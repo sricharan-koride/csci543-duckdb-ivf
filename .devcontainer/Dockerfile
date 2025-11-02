@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     ninja-build \
     ccache \
+    libssl-dev \
     && apt-get clean
 
 # Create a non-root user for VS Code

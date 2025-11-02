@@ -1,0 +1,23 @@
+# name: test/sql/ivf.test
+# description: test ivf extension
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT ivf('Sam');
+----
+Catalog Error: Scalar Function with name ivf does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require ivf
+
+# Confirm the extension works
+query I
+SELECT ivf('Sam');
+----
+Ivf Sam 🐥
+
+query I
+SELECT ivf_openssl_version('Michael') ILIKE 'Ivf Michael, my linked OpenSSL version is OpenSSL%';
+----
+true
