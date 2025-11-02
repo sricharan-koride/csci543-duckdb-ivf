@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y \
     ninja-build \
     ccache \
     libssl-dev \
+    wget \
     && apt-get clean
 
 # Create a non-root user for VS Code
