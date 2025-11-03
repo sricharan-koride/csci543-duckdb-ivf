@@ -16,8 +16,30 @@
 #include "duckdb/main/appender.hpp"
 #include "duckdb/common/types/value.hpp"
 
-namespace duckdb {
+#include <cmath>   // For sqrt
+#include <limits>  // For std::numeric_limits
+#include <map>
 
+
+namespace duckdb {
+// --- (Anonymous namespace for helper functions) ---
+namespace {
+
+// Helper function to compute L2 (Euclidean) distance
+// We use squared distance to avoid the expensive sqrt()
+// which is fine for finding the *nearest* neighbor
+float L2SquaredDistance(const std::vector<float>& a, const std::vector<float>& b) {
+    float sum = 0;
+    size_t dim = a.size();
+    for (size_t i = 0; i < dim; i++) {
+        float diff = a[i] - b[i];
+        sum += diff * diff;
+    }
+    return sum;
+}
+
+} // namespace (anonymous)
+// --- End of helper functions ---
 void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
     // 1. Get the arguments
     auto index_name = args.GetValue(0, 0).ToString();
@@ -228,6 +250,168 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
     
     printf("Centroids persisted successfully.\n");
    
+    // This will hold our 100 centroids
+    std::vector<std::vector<float>> centroids;
+    // Create a query to read from the new table
+    auto centroid_query = context.Query("SELECT centroid FROM " + centroid_table_name + " ORDER BY cluster_id", false);
+    if (!centroid_query || !centroid_query->GetError().empty()) {
+        printf("Error reading centroids: %s\n", centroid_query ? centroid_query->GetError().c_str() : "null result");
+        result.SetVectorType(VectorType::CONSTANT_VECTOR);
+        ConstantVector::SetNull(result, true);
+        return;
+    }
+
+    // Loop over the results and extract the centroid vectors
+    while (auto chunk = centroid_query->Fetch()) {
+        if (!chunk || chunk->size() == 0) {
+            break;
+        }
+
+        auto &vector_column = chunk->data[0];
+        auto logical_type = vector_column.GetType().id();
+        auto row_count = chunk->size();
+
+        // This is the same ARRAY logic we used for sampling
+        if (logical_type == LogicalTypeId::ARRAY) {
+            auto array_size = ArrayType::GetSize(vector_column.GetType());
+            auto &child_vector = ListVector::GetEntry(vector_column);
+            auto total_child_elements = row_count * array_size;
+            child_vector.Flatten(total_child_elements);
+            auto float_data = FlatVector::GetData<float>(child_vector);
+
+            for (idx_t i = 0; i < row_count; i++) {
+                auto offset = i * array_size;
+                std::vector<float> row_vector;
+                row_vector.reserve(array_size);
+                for (idx_t j = 0; j < array_size; j++) {
+                    row_vector.push_back(float_data[offset + j]);
+                }
+                // Add the centroid to our in-memory list
+                centroids.push_back(std::move(row_vector));
+            }
+        } else {
+             printf("Error: Centroid table has unexpected type %s\n",
+                   LogicalTypeIdToString(logical_type).c_str());
+        }
+    }
+    
+    printf("Successfully loaded %zu centroids back into memory.\n", centroids.size());
+
+    // --- 10. Create and Build Inverted Lists ---
+
+    // 1. Create the inverted list table
+    auto inverted_list_table_name = "ivf_lists_" + index_name;
+    printf("Creating inverted list table '%s'...\n", inverted_list_table_name.c_str());
+    
+    auto create_list_sql = StringUtil::Format(
+        "CREATE OR REPLACE TABLE %s (cluster_id INTEGER, vector_ids BIGINT[])",
+        inverted_list_table_name
+    );
+    auto create_list_result = context.Query(create_list_sql, false);
+    if (!create_list_result || !create_list_result->GetError().empty()) {
+        printf("Error creating inverted list table: %s\n", 
+            create_list_result ? create_list_result->GetError().c_str() : "null result");
+        result.SetVectorType(VectorType::CONSTANT_VECTOR);
+        ConstantVector::SetNull(result, true);
+        return;
+    }
+
+    // 2. This map will hold our inverted lists in memory
+    // It maps: cluster_id -> list of vector_ids
+    std::map<int, std::vector<int64_t>> inverted_lists;
+
+    // 3. Scan the *entire* base table (all 1 million vectors)
+    printf("Scanning full table '%s' to build inverted lists...\n", table_name.c_str());
+    auto full_scan_query_str = StringUtil::Format("SELECT id, %s FROM %s", column_name, table_name);
+    auto full_scan_query = context.Query(full_scan_query_str, false);
+    
+    if (!full_scan_query || !full_scan_query->GetError().empty()) {
+        printf("Error scanning full table: %s\n", full_scan_query ? full_scan_query->GetError().c_str() : "null result");
+        result.SetVectorType(VectorType::CONSTANT_VECTOR);
+        ConstantVector::SetNull(result, true);
+        return;
+    }
+    
+    int64_t total_vectors_processed = 0;
+
+    // Loop over all data, chunk by chunk
+    while (auto chunk = full_scan_query->Fetch()) {
+        if (!chunk || chunk->size() == 0) {
+            break;
+        }
+
+        auto &id_column = chunk->data[0];
+        auto &vector_column = chunk->data[1];
+        auto row_count = chunk->size();
+        
+        auto id_data = FlatVector::GetData<int64_t>(id_column);
+
+        // --- Extract vectors (using the same ARRAY logic) ---
+        auto array_size = ArrayType::GetSize(vector_column.GetType());
+        auto &child_vector = ListVector::GetEntry(vector_column);
+        auto total_child_elements = row_count * array_size;
+        child_vector.Flatten(total_child_elements);
+        auto float_data = FlatVector::GetData<float>(child_vector);
+
+        std::vector<float> current_vector;
+        current_vector.reserve(array_size);
+
+        // --- 4. Assign each vector to its nearest centroid ---
+        for (idx_t i = 0; i < row_count; i++) {
+            // 4a. Reconstruct the vector
+            current_vector.clear();
+            auto offset = i * array_size;
+            for (idx_t j = 0; j < array_size; j++) {
+                current_vector.push_back(float_data[offset + j]);
+            }
+
+            // 4b. Find the nearest centroid
+            int best_cluster_id = -1;
+            float min_dist = std::numeric_limits<float>::max();
+
+            for (size_t c = 0; c < centroids.size(); c++) {
+                float dist = L2SquaredDistance(current_vector, centroids[c]);
+                if (dist < min_dist) {
+                    min_dist = dist;
+                    best_cluster_id = c;
+                }
+            }
+
+            // 4c. Add this vector's ID to the correct inverted list
+            inverted_lists[best_cluster_id].push_back(id_data[i]);
+            total_vectors_processed++;
+        }
+
+        // --- 5. Persist the inverted lists ---
+        printf("Persisting inverted lists...\n");
+        Appender list_appender(new_connection, "main", inverted_list_table_name);
+        
+        for (auto const& pair : inverted_lists) {
+            auto cluster_id = pair.first;
+            auto& id_list = pair.second;
+
+            // Create a std::vector<Value> for the BIGINT IDs
+            std::vector<Value> id_values;
+            id_values.reserve(id_list.size());
+            for (int64_t id : id_list) {
+                id_values.push_back(Value::BIGINT(id));
+            }
+
+            // Create the DuckDB ARRAY value
+            auto id_array = Value::ARRAY(LogicalType::BIGINT, std::move(id_values));
+
+            // Append the row
+            list_appender.BeginRow();
+            list_appender.Append(Value::INTEGER(cluster_id));
+            list_appender.Append(std::move(id_array));
+            list_appender.EndRow();
+        }
+        
+            list_appender.Close();
+            printf("Inverted lists persisted successfully.\n");
+        }
+
+        printf("Finished scanning. Total vectors processed: %ld\n", total_vectors_processed);
 
     // Set the result to null
     result.SetVectorType(VectorType::CONSTANT_VECTOR);
