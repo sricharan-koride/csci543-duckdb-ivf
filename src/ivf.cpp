@@ -13,6 +13,9 @@
 #include "kmeans/SimpleMatrix.hpp"
 #include <random>
 
+#include "duckdb/main/appender.hpp"
+#include "duckdb/common/types/value.hpp"
+
 namespace duckdb {
 
 void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -172,7 +175,58 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
 
     // --- 8. Next Step: Persist Centroids ---
     // You would now write 'result_data.centers' to a new table.
+  
+    
+    // We will create a table named 'ivf_centroids_[index_name]'
+    auto centroid_table_name = "ivf_centroids_" + index_name;
+    
+    printf("Persisting %d centroids to table '%s'...\n", num_clusters, centroid_table_name.c_str());
 
+    // 1. Create the table
+    auto create_table_sql = StringUtil::Format(
+        "CREATE OR REPLACE TABLE %s (cluster_id INTEGER, centroid FLOAT[%llu])",
+        centroid_table_name, dim
+    );
+    auto create_result = context.Query(create_table_sql, false);
+    if (!create_result || !create_result->GetError().empty()) {
+        printf("Error creating centroid table: %s\n", 
+            create_result ? create_result->GetError().c_str() : "null result");
+        result.SetVectorType(VectorType::CONSTANT_VECTOR);
+        ConstantVector::SetNull(result, true);
+        return;
+    }
+
+    // 2. Use an Appender for high-speed inserts
+    Appender appender(new_connection, "main", centroid_table_name); // <-- CORRECT
+    
+    // 'result_data.centers' is a flat vector: [c1_f1, c1_f2, ..., c2_f1, c2_f2, ...]
+    auto& centers_data = result_data.centers;
+
+    for (int c = 0; c < num_clusters; c++) {
+        // Get the start of the data for this centroid
+        auto offset = c * dim;
+
+        // Create a std::vector<Value> for the floats of this single centroid
+        std::vector<Value> centroid_values;
+        centroid_values.reserve(dim);
+        for (size_t i = 0; i < dim; i++) {
+            centroid_values.push_back(Value::FLOAT(centers_data[offset + i]));
+        }
+
+        // Create the DuckDB ARRAY value
+        auto centroid_array = Value::ARRAY(LogicalType::FLOAT, std::move(centroid_values));
+
+        // Append the row
+        appender.BeginRow();
+        appender.Append(Value::INTEGER(c)); // cluster_id
+        appender.Append(std::move(centroid_array)); // centroid
+        appender.EndRow();
+    }
+    
+    // 4. Close the appender to flush changes
+    appender.Close();
+    
+    printf("Centroids persisted successfully.\n");
    
 
     // Set the result to null
