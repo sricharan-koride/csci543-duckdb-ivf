@@ -4,6 +4,8 @@
 #include "ivf.hpp"
 #include "duckdb.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/function/table_function.hpp"
+#include "ivf_search.hpp" 
 
 
 
@@ -19,8 +21,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                                        LogicalType::SQLNULL, CreateIVFIndex);
 
+	TableFunction ann_search_func("ann_search", {LogicalType:: VARCHAR, LogicalType::ARRAY(LogicalType::FLOAT, 128), LogicalType::INTEGER, LogicalType::INTEGER}
+,ComputeIVFSearch, BindIVFSearch, InitIVFSearch);
+
+	ann_search_func.named_parameters["nprobe"] = LogicalType::INTEGER;
 	loader.RegisterFunction(create_ivf_index_func);
-	
+	loader.RegisterFunction(ann_search_func);
 }
 
 void IvfExtension::Load(ExtensionLoader &loader) {

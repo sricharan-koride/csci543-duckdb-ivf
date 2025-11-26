@@ -322,7 +322,8 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
 
     // 3. Scan the *entire* base table (all 1 million vectors)
     printf("Scanning full table '%s' to build inverted lists...\n", table_name.c_str());
-    auto full_scan_query_str = StringUtil::Format("SELECT id, %s FROM %s", column_name, table_name);
+    // Force ID to be BIGINT so FlatVector::GetData<int64_t> works correctly
+    auto full_scan_query_str = StringUtil::Format("SELECT id::BIGINT, %s FROM %s", column_name, table_name);
     auto full_scan_query = context.Query(full_scan_query_str, false);
     
     if (!full_scan_query || !full_scan_query->GetError().empty()) {
