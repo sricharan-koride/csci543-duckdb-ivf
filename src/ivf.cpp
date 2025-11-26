@@ -382,6 +382,7 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
             inverted_lists[best_cluster_id].push_back(id_data[i]);
             total_vectors_processed++;
         }
+    }
 
         // --- 5. Persist the inverted lists ---
         printf("Persisting inverted lists...\n");
@@ -410,7 +411,6 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         
             list_appender.Close();
             printf("Inverted lists persisted successfully.\n");
-        }
 
         printf("Finished scanning. Total vectors processed: %ld\n", total_vectors_processed);
 
