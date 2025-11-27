@@ -25,6 +25,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 ,ComputeIVFSearch, BindIVFSearch, InitIVFSearch);
 
 	ann_search_func.named_parameters["nprobe"] = LogicalType::INTEGER;
+	ann_search_func.named_parameters["allowed_ids"] = LogicalType::LIST(LogicalType::BIGINT); // <-- ADD THIS
 	loader.RegisterFunction(create_ivf_index_func);
 	loader.RegisterFunction(ann_search_func);
 }

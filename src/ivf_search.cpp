@@ -16,6 +16,9 @@ namespace duckdb {
 static float L2SquaredDistance(const std::vector<float>& a, const std::vector<float>& b) {
     float sum = 0;
     size_t dim = a.size();
+    // Safety check
+    if (b.size() != dim) return std::numeric_limits<float>::infinity();
+    
     for (size_t i = 0; i < dim; i++) {
         float diff = a[i] - b[i];
         sum += diff * diff;
@@ -39,6 +42,16 @@ unique_ptr<FunctionData> BindIVFSearch(ClientContext &context, TableFunctionBind
     result->k = input.inputs[2].GetValue<int32_t>();
     result->nprobe = input.inputs[3].GetValue<int32_t>();
 
+    // Parse Filter
+    if (input.named_parameters.find("allowed_ids") != input.named_parameters.end()) {
+        result->has_filter = true;
+        auto filter_value = input.named_parameters["allowed_ids"];
+        auto &filter_children = ListValue::GetChildren(filter_value);
+        for (auto &child : filter_children) {
+            result->allowed_ids.insert(child.GetValue<int64_t>());
+        }
+    }
+
     names.emplace_back("id");
     return_types.emplace_back(LogicalType::BIGINT);
     names.emplace_back("score");
@@ -53,7 +66,6 @@ void LoadCentroids(ClientContext &context, const string &index_name, std::vector
     auto result = context.Query(query, false);
     
     if (!result || !result->GetError().empty()) {
-        // In a real app, handle error gracefully. For dev, we throw.
         throw std::runtime_error("Failed to load centroids: " + (result ? result->GetError() : "Unknown error"));
     }
 
@@ -63,9 +75,12 @@ void LoadCentroids(ClientContext &context, const string &index_name, std::vector
         auto &vector_col = chunk->data[0];
         auto row_count = chunk->size();
         
-        // Handle ARRAY type
-        auto array_size = ArrayType::GetSize(vector_col.GetType());
+        // FIX: Infer dimension from the data itself for the first batch, or hardcode 128
+        // Here we look at the child vector length vs row count
         auto &child_vec = ListVector::GetEntry(vector_col);
+        idx_t child_len = ListVector::GetListSize(vector_col);
+        idx_t array_size = (row_count > 0) ? (child_len / row_count) : 128; // Fallback
+        
         child_vec.Flatten(row_count * array_size);
         auto float_data = FlatVector::GetData<float>(child_vec);
 
@@ -84,12 +99,20 @@ unique_ptr<GlobalTableFunctionState> InitIVFSearch(ClientContext &context, Table
     auto state = make_uniq<IVFSearchGlobalState>();
     auto &bind_data = input.bind_data->Cast<IVFSearchFunctionData>();
 
+    state->has_filter = bind_data.has_filter;
+    state->allowed_ids = bind_data.allowed_ids;
+    
+    if (state->has_filter) {
+        printf("Hybrid Filter Active: Restricted search to %zu specific IDs.\n", state->allowed_ids.size());
+    }
+
     auto &db = context.db;
     Connection new_connection(*db);
     auto &new_context = *new_connection.context;
 
     try {
         LoadCentroids(new_context, bind_data.index_name, state->centroids);
+        // printf("Loaded %zu centroids.\n", state->centroids.size());
     } catch (std::exception &e) {
         printf("Error loading index: %s\n", e.what());
     }
@@ -101,10 +124,9 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
     auto &state = data_p.global_state->Cast<IVFSearchGlobalState>();
     auto &bind_data = data_p.bind_data->Cast<IVFSearchFunctionData>();
 
-    // --- STEP 1: Perform Search (Only once) ---
-    if (state.current_offset == 0 && state.final_results.empty()) {
+    if (state.current_offset == 0 && state.final_results.empty() && !state.is_done) {
         
-        // A. PROBE: Find nearest centroids
+        // A. PROBE
         std::vector<std::pair<float, int>> cluster_distances;
         for (int i = 0; i < (int)state.centroids.size(); i++) {
             float dist = L2SquaredDistance(bind_data.query_vector, state.centroids[i]);
@@ -112,17 +134,13 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
         }
         std::sort(cluster_distances.begin(), cluster_distances.end());
 
-        // Get top nprobe clusters
         std::vector<int> probes;
         int actual_nprobe = std::min(bind_data.nprobe, (int32_t)cluster_distances.size());
         for (int i = 0; i < actual_nprobe; i++) {
             probes.push_back(cluster_distances[i].second);
         }
 
-        // B. SCAN: Fetch candidates from DB using JOIN
-        // Query: SELECT s.id, s.vec FROM sift_base s JOIN 
-        //        (SELECT unnest(vector_ids) as vid FROM ivf_lists_... WHERE cluster_id IN (...)) c ON s.id=c.vid
-        
+        // B. SCAN
         string cluster_list_str;
         for (size_t i = 0; i < probes.size(); i++) {
             cluster_list_str += std::to_string(probes[i]);
@@ -136,13 +154,10 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
             bind_data.index_name.c_str(), cluster_list_str.c_str()
         );
 
-        // We need a fresh connection for this query
         auto &db = context.db;
         Connection search_conn(*db);
         auto query_result = search_conn.context->Query(sql, false);
 
-        // C. RANK: Compute exact distances for candidates
-        // Priority queue to keep top K (Max-heap stores largest distance at top, so we can pop it)
         using ResultPair = std::pair<float, int64_t>;
         std::priority_queue<ResultPair> top_k_heap;
 
@@ -150,57 +165,61 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
             while (auto chunk = query_result->Fetch()) {
                 if (!chunk || chunk->size() == 0) break;
                 chunk->Flatten();
+
                 auto &id_col = chunk->data[0];
                 auto &vec_col = chunk->data[1];
                 auto row_count = chunk->size();
                 auto id_data = FlatVector::GetData<int64_t>(id_col);
 
-                // Extract vectors
-                auto array_size = ArrayType::GetSize(vec_col.GetType());
+                // --- FIX: Use query vector size as truth ---
+                idx_t array_size = bind_data.query_vector.size(); 
+                
                 auto &child_vec = ListVector::GetEntry(vec_col);
                 child_vec.Flatten(row_count * array_size);
                 auto float_data = FlatVector::GetData<float>(child_vec);
 
                 for (idx_t i = 0; i < row_count; i++) {
-                    // Reconstruct candidate vector
+                    int64_t candidate_id = id_data[i];
+
+                    if (state.has_filter) {
+                        if (state.allowed_ids.find(candidate_id) == state.allowed_ids.end()) {
+                            continue; 
+                        }
+                    }
+
                     std::vector<float> candidate_vec;
                     candidate_vec.reserve(array_size);
                     for (idx_t j = 0; j < array_size; j++) {
                         candidate_vec.push_back(float_data[i * array_size + j]);
                     }
 
-                    // Exact Distance
                     float dist = L2SquaredDistance(bind_data.query_vector, candidate_vec);
 
-                    // Maintain Top-K
                     if (top_k_heap.size() < (size_t)bind_data.k) {
-                        top_k_heap.push({dist, id_data[i]});
+                        top_k_heap.push({dist, candidate_id});
                     } else if (dist < top_k_heap.top().first) {
                         top_k_heap.pop();
-                        top_k_heap.push({dist, id_data[i]});
+                        top_k_heap.push({dist, candidate_id});
                     }
                 }
             }
         }
 
-        // D. Finalize Results (Drain heap to vector)
         while (!top_k_heap.empty()) {
             auto item = top_k_heap.top();
             state.final_results.push_back({item.second, item.first});
             top_k_heap.pop();
         }
-        // Heap gives worst-first, so reverse to get best-first
         std::reverse(state.final_results.begin(), state.final_results.end());
+        state.is_done = true;
     }
 
-    // --- STEP 2: Stream Results to Output ---
     idx_t remaining = state.final_results.size() - state.current_offset;
     if (remaining == 0) {
-        output.SetCardinality(0); // Done!
+        output.SetCardinality(0);
         return;
     }
 
-    // Send up to STANDARD_VECTOR_SIZE rows (usually 2048)
     idx_t count = std::min<idx_t>(remaining, STANDARD_VECTOR_SIZE);
     output.SetCardinality(count);
 
