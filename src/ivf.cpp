@@ -414,9 +414,10 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
 
         printf("Finished scanning. Total vectors processed: %ld\n", total_vectors_processed);
 
-    // Set the result to null
+    // Return a success message
     result.SetVectorType(VectorType::CONSTANT_VECTOR);
-    ConstantVector::SetNull(result, true);
+    auto data = ConstantVector::GetData<string_t>(result);
+    data[0] = string_t("Index created successfully");
 }
 
 } // namespace duckdb
