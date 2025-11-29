@@ -31,9 +31,15 @@ unique_ptr<FunctionData> BindIVFSearch(ClientContext &context, TableFunctionBind
     auto result = make_uniq<IVFSearchFunctionData>();
     result->index_name = input.inputs[0].ToString();
     
-    // Parse Query Vector
+    // Parse Query Vector (accept either a fixed-size ARRAY or a variable-length LIST)
     auto query_val = input.inputs[1];
-    auto &children = ArrayValue::GetChildren(query_val);
+    const vector<Value> *children_ptr = nullptr;
+    if (query_val.type().id() == LogicalTypeId::LIST) {
+        children_ptr = &ListValue::GetChildren(query_val);
+    } else {
+        children_ptr = &ArrayValue::GetChildren(query_val);
+    }
+    const auto &children = *children_ptr;
     result->query_vector.reserve(children.size());
     for (auto &child : children) {
         result->query_vector.push_back(child.GetValue<float>());
@@ -50,6 +56,11 @@ unique_ptr<FunctionData> BindIVFSearch(ClientContext &context, TableFunctionBind
         for (auto &child : filter_children) {
             result->allowed_ids.insert(child.GetValue<int64_t>());
         }
+    }
+    // Optional WHERE clause pushed by the optimizer
+    if (input.named_parameters.find("where_clause") != input.named_parameters.end()) {
+        result->has_where = true;
+        result->where_clause = input.named_parameters["where_clause"].GetValue<string>();
     }
 
     names.emplace_back("id");
@@ -101,6 +112,8 @@ unique_ptr<GlobalTableFunctionState> InitIVFSearch(ClientContext &context, Table
 
     state->has_filter = bind_data.has_filter;
     state->allowed_ids = bind_data.allowed_ids;
+    state->has_where = bind_data.has_where;
+    state->where_clause = bind_data.where_clause;
     
     if (state->has_filter) {
         printf("Hybrid Filter Active: Restricted search to %zu specific IDs.\n", state->allowed_ids.size());
@@ -115,6 +128,27 @@ unique_ptr<GlobalTableFunctionState> InitIVFSearch(ClientContext &context, Table
         // printf("Loaded %zu centroids.\n", state->centroids.size());
     } catch (std::exception &e) {
         printf("Error loading index: %s\n", e.what());
+    }
+
+    // Load base table name from metadata table if present
+    try {
+        auto meta_q = StringUtil::Format("SELECT table_name FROM ivf_index_metadata WHERE index_name = '%s' LIMIT 1", bind_data.index_name.c_str());
+        auto meta_res = new_context.Query(meta_q, false);
+        if (meta_res && meta_res->GetError().empty()) {
+            while (auto chunk = meta_res->Fetch()) {
+                if (!chunk || chunk->size() == 0) break;
+                auto &col = chunk->data[0];
+                auto row_count = chunk->size();
+                // Read first row's string
+                auto str_data = FlatVector::GetData<string_t>(col);
+                if (row_count > 0) {
+                    state->base_table = str_data[0].GetString();
+                    break;
+                }
+            }
+        }
+    } catch (...) {
+        // ignore metadata load failures; defaulting to empty -> caller must handle
     }
 
     return std::move(state);
@@ -164,13 +198,19 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
             // printf("Adaptive Scan: Checking clusters rank %zu to %zu...\n", clusters_scanned, end_idx);
 
             // 2. Execute SQL for this batch
+            // Choose base table from metadata if available, otherwise fall back to 'sift_base'
+            string base_table = state.base_table.empty() ? string("sift_base") : state.base_table;
             string sql = StringUtil::Format(
-                "SELECT s.id::BIGINT, s.vec FROM sift_base s JOIN "
+                "SELECT s.id::BIGINT, s.vec FROM %s s JOIN "
                 "(SELECT unnest(vector_ids) as vid FROM ivf_lists_%s WHERE cluster_id IN (%s)) c "
                 "ON s.id = c.vid", 
-                bind_data.index_name.c_str(), cluster_list_str.c_str()
+                base_table.c_str(), bind_data.index_name.c_str(), cluster_list_str.c_str()
             );
-
+            // Append optional where clause (safe-guarded by optimizer)
+            if (state.has_where && !state.where_clause.empty()) {
+                sql += " WHERE ";
+                sql += state.where_clause;
+            }
             auto &db = context.db;
             Connection search_conn(*db);
             auto query_result = search_conn.context->Query(sql, false);

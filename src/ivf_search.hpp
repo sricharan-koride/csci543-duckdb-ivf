@@ -16,6 +16,11 @@ struct IVFSearchFunctionData : public TableFunctionData {
     // Filter Data (Parsed during Bind)
     bool has_filter = false;
     std::unordered_set<int64_t> allowed_ids;
+    // Free-form WHERE clause pushed from optimizer (optional)
+    bool has_where = false;
+    string where_clause;
+    // Base table name (populated at Init from index metadata)
+    string base_table;
 };
 
 // --- State object ---
@@ -26,6 +31,11 @@ struct IVFSearchGlobalState : public GlobalTableFunctionState {
     // Filter Data (Copied from FunctionData)
     bool has_filter = false; 
     std::unordered_set<int64_t> allowed_ids;
+    // Where-clause pushed from optimizer
+    bool has_where = false;
+    string where_clause;
+    // Base table name to scan for candidates
+    string base_table;
 
     // Results
     struct SearchResult {

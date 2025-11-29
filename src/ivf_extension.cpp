@@ -45,14 +45,20 @@ static void LoadInternal(DatabaseInstance &db) {
 
 
     // --- 2. Register ANN_SEARCH (Table Function) ---
+    // Use a variable-length list for the query vector so different dimensionalities
+    // are accepted (avoids hard-coded FLOAT[128] signature mismatches).
     TableFunction ann_search_func("ann_search", 
-        {LogicalType::VARCHAR, LogicalType::ARRAY(LogicalType::FLOAT, 128), LogicalType::INTEGER, LogicalType::INTEGER}, 
+        {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::FLOAT), LogicalType::INTEGER, LogicalType::INTEGER}, 
         ComputeIVFSearch, 
         BindIVFSearch,
         InitIVFSearch
     );
     ann_search_func.named_parameters["nprobe"] = LogicalType::INTEGER;
     ann_search_func.named_parameters["allowed_ids"] = LogicalType::LIST(LogicalType::BIGINT);
+    // Named parameter that allows passing a serialized WHERE fragment from the optimizer
+    // into the table-function so the inner candidate-selection SQL can apply the
+    // same predicate (e.g., s.region = 'US').
+    ann_search_func.named_parameters["where_clause"] = LogicalType::VARCHAR;
 
     CreateTableFunctionInfo table_func_info(ann_search_func);
     table_func_info.on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;

@@ -140,11 +140,65 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
     // Flatten our vector data for the library
     size_t total_vectors = sample_vectors.size();
     size_t dim = 0;
+    // If sampling returned zero vectors (small tables, low bernoulli sample),
+    // fallback to a full-table scan to collect vectors for k-means.
     if (total_vectors == 0) {
-        printf("Error: No vectors sampled.\n");
-        result.SetVectorType(VectorType::CONSTANT_VECTOR);
-        ConstantVector::SetNull(result, true);
-        return;
+        printf("Warning: Sampling returned 0 vectors; performing full-table scan to collect vectors for clustering...\n");
+        auto full_sample_query_str = StringUtil::Format("SELECT %s FROM %s", column_name, table_name);
+        auto full_sample_query = context.Query(full_sample_query_str, false);
+        if (!full_sample_query || !full_sample_query->GetError().empty()) {
+            printf("Error: Failed to collect vectors from full table: %s\n", full_sample_query ? full_sample_query->GetError().c_str() : "null result");
+            result.SetVectorType(VectorType::CONSTANT_VECTOR);
+            ConstantVector::SetNull(result, true);
+            return;
+        }
+        while (auto chunk = full_sample_query->Fetch()) {
+            if (!chunk || chunk->size() == 0) break;
+            auto &vector_column = chunk->data[0];
+            auto logical_type = vector_column.GetType().id();
+            auto row_count = chunk->size();
+
+            if (logical_type == LogicalTypeId::LIST) {
+                auto list_data = ListVector::GetData(vector_column);
+                auto &child_vector = ListVector::GetEntry(vector_column);
+                auto float_data = FlatVector::GetData<float>(child_vector);
+                for (idx_t i = 0; i < row_count; i++) {
+                    auto list_entry = list_data[i];
+                    auto offset = list_entry.offset;
+                    auto length = list_entry.length;
+                    std::vector<float> row_vector;
+                    row_vector.reserve(length);
+                    for (idx_t j = 0; j < length; j++) {
+                        row_vector.push_back(float_data[offset + j]);
+                    }
+                    sample_vectors.push_back(std::move(row_vector));
+                }
+
+            } else if (logical_type == LogicalTypeId::ARRAY) {
+                auto array_size = ArrayType::GetSize(vector_column.GetType());
+                auto &child_vector = ListVector::GetEntry(vector_column);
+                auto total_child_elements = row_count * array_size;
+                child_vector.Flatten(total_child_elements);
+                auto float_data = FlatVector::GetData<float>(child_vector);
+                for (idx_t i = 0; i < row_count; i++) {
+                    auto offset = i * array_size;
+                    std::vector<float> row_vector;
+                    row_vector.reserve(array_size);
+                    for (idx_t j = 0; j < array_size; j++) {
+                        row_vector.push_back(float_data[offset + j]);
+                    }
+                    sample_vectors.push_back(std::move(row_vector));
+                }
+            }
+        }
+        total_vectors = sample_vectors.size();
+        printf("Full-scan sampling complete. Total vectors sampled: %zu\n", total_vectors);
+        if (total_vectors == 0) {
+            printf("Error: No vectors available in table '%s'.\n", table_name.c_str());
+            result.SetVectorType(VectorType::CONSTANT_VECTOR);
+            ConstantVector::SetNull(result, true);
+            return;
+        }
     }
     dim = sample_vectors[0].size(); // Get dimensionality (e.g., 128)
 
@@ -411,6 +465,17 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         
             list_appender.Close();
             printf("Inverted lists persisted successfully.\n");
+
+        // Persist index metadata for ann_search to discover the base table
+        auto create_meta_sql = StringUtil::Format(
+            "CREATE TABLE IF NOT EXISTS ivf_index_metadata (index_name VARCHAR, table_name VARCHAR, column_name VARCHAR)"
+        );
+        context.Query(create_meta_sql, false);
+        auto insert_meta_sql = StringUtil::Format(
+            "INSERT INTO ivf_index_metadata VALUES ('%s', '%s', '%s')",
+            index_name.c_str(), table_name.c_str(), column_name.c_str()
+        );
+        context.Query(insert_meta_sql, false);
 
         printf("Finished scanning. Total vectors processed: %ld\n", total_vectors_processed);
 
