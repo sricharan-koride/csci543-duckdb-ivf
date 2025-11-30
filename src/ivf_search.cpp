@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <queue>
 #include <cmath>
+#include "pq.hpp"
 
 namespace duckdb {
 
@@ -170,6 +171,24 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
         // Sort centroids by distance (closest first)
         std::sort(cluster_distances.begin(), cluster_distances.end());
 
+        // --- IVF-PQ: Load PQ structures and build LUT for this query (if available) ---
+        PQCodebook pq_codebook;
+        std::vector<std::vector<uint8_t>> pq_codes;
+        std::vector<std::vector<float>> pq_lut;
+        bool pq_available = false;
+
+        try {
+            // Load PQ codebooks and codes using the same context
+            LoadPQCodebooks(context, bind_data.index_name, pq_codebook);
+            LoadPQCodes(context, bind_data.index_name, pq_codes);
+            BuildPQDistanceLUT(bind_data.query_vector, pq_codebook, pq_lut);
+            pq_available = true;
+            // printf("IVF-PQ enabled: M=%d, Ks=%d, codes=%zu\n", pq_codebook.M, pq_codebook.Ks, pq_codes.size());
+        } catch (std::exception &e) {
+            // If anything fails (no PQ tables, etc.), fall back to exact L2
+            printf("IVF-PQ disabled (falling back to exact L2): %s\n", e.what());
+        }
+
         // Priority Queue for Top-K results
         using ResultPair = std::pair<float, int64_t>;
         std::priority_queue<ResultPair> top_k_heap;
@@ -241,14 +260,26 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
                             }
                         }
 
-                        // Distance Calculation
-                        std::vector<float> candidate_vec;
-                        candidate_vec.reserve(array_size);
-                        for (idx_t j = 0; j < array_size; j++) {
-                            candidate_vec.push_back(float_data[i * array_size + j]);
-                        }
+                        // Distance Calculation: prefer IVF-PQ, fall back to exact L2 if needed
+                        float dist = 0.0f;
+                        bool used_pq = false;
 
-                        float dist = L2SquaredDistance(bind_data.query_vector, candidate_vec);
+                        if (pq_available &&
+                            candidate_id >= 0 &&
+                            static_cast<idx_t>(candidate_id) < pq_codes.size() &&
+                            !pq_codes[static_cast<idx_t>(candidate_id)].empty()) {
+                            // Use PQ distance via LUT
+                            dist = PQDistance(pq_codes[static_cast<idx_t>(candidate_id)], pq_lut);
+                            used_pq = true;
+                        } else {
+                            // Fallback: reconstruct full vector and compute exact L2 distance
+                            std::vector<float> candidate_vec;
+                            candidate_vec.reserve(array_size);
+                            for (idx_t j = 0; j < array_size; j++) {
+                                candidate_vec.push_back(float_data[i * array_size + j]);
+                            }
+                            dist = L2SquaredDistance(bind_data.query_vector, candidate_vec);
+                        }
 
                         if (top_k_heap.size() < (size_t)bind_data.k) {
                             top_k_heap.push({dist, candidate_id});

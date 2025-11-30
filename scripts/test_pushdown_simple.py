@@ -62,7 +62,7 @@ def cli_run_search_and_get_ids():
     query_vec = row[0]
     dim = len(query_vec)
     ids = [r[0] for r in con.execute(
-        f"SELECT id FROM ann_search('my_index', ?::FLOAT[{dim}], 5, 2, where_clause=>'region = ''US''')",
+        f"SELECT id FROM ann_search('my_index', ?::FLOAT[{dim}], 5, 128, where_clause=>'region = ''US''')",
         [query_vec]
     ).fetchall()]
     con.close()

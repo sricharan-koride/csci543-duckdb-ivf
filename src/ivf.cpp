@@ -7,6 +7,8 @@
 #include <vector>
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/connection.hpp"
+#include "pq.hpp"
+#include <cstdint>
 
 // --- ADD THESE HEADERS FOR K-MEANS ---
 #include "kmeans/Kmeans.hpp"
@@ -31,6 +33,16 @@ namespace {
 float L2SquaredDistance(const std::vector<float>& a, const std::vector<float>& b) {
     float sum = 0;
     size_t dim = a.size();
+    for (size_t i = 0; i < dim; i++) {
+        float diff = a[i] - b[i];
+        sum += diff * diff;
+    }
+    return sum;
+}
+
+// Pointer-based helper for PQ encoding
+float L2SquaredDistancePtr(const float *a, const float *b, size_t dim) {
+    float sum = 0.0f;
     for (size_t i = 0; i < dim; i++) {
         float diff = a[i] - b[i];
         sum += diff * diff;
@@ -209,7 +221,7 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
     }
 
     // Define k-means parameters
-    int num_clusters = 100; // You can make this configurable later
+    int num_clusters = args.GetValue(3, 0).GetValue<int32_t>();
     int num_threads = 4;    // Number of threads to use
 
     printf("Starting k-means clustering with %zu vectors...\n", total_vectors);
@@ -247,6 +259,27 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
     // 'result_data.centers' is a std::vector<float> containing the centroids
     if (!result_data.centers.empty()) {
         printf("  First centroid's first value: %f\n", result_data.centers[0]);
+    }
+
+    // --- PQ TRAINING & CODEBOOK PERSISTENCE ---
+    // Configure PQ parameters
+    PQMetadata pq_meta;
+    pq_meta.dim = static_cast<int>(dim);
+    pq_meta.M = 16;    // number of sub-vectors
+    pq_meta.Ks = 256;  // number of centroids per subspace
+
+    PQCodebook pq_codebook;
+    try {
+        printf("Starting PQ training (M = %d, Ks = %d, dim = %d)...\n", pq_meta.M, pq_meta.Ks, pq_meta.dim);
+        TrainPQCodebooks(sample_vectors, pq_meta, pq_codebook);
+        printf("PQ training complete. Persisting PQ codebooks...\n");
+        PersistPQCodebooks(context, index_name, pq_codebook);
+        printf("PQ codebooks persisted successfully.\n");
+    } catch (std::exception &e) {
+        printf("Error during PQ training/persistence: %s\n", e.what());
+        result.SetVectorType(VectorType::CONSTANT_VECTOR);
+        ConstantVector::SetNull(result, true);
+        return;
     }
 
     // --- 8. Next Step: Persist Centroids ---
@@ -373,6 +406,8 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
     // 2. This map will hold our inverted lists in memory
     // It maps: cluster_id -> list of vector_ids
     std::map<int, std::vector<int64_t>> inverted_lists;
+    // Map: base table vector id -> PQ code (M bytes)
+    std::map<int64_t, std::vector<uint8_t>> pq_codes;
 
     // 3. Scan the *entire* base table (all 1 million vectors)
     printf("Scanning full table '%s' to build inverted lists...\n", table_name.c_str());
@@ -411,7 +446,7 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         std::vector<float> current_vector;
         current_vector.reserve(array_size);
 
-        // --- 4. Assign each vector to its nearest centroid ---
+        // --- 4. Assign each vector to its nearest centroid and compute PQ codes ---
         for (idx_t i = 0; i < row_count; i++) {
             // 4a. Reconstruct the vector
             current_vector.clear();
@@ -428,13 +463,41 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
                 float dist = L2SquaredDistance(current_vector, centroids[c]);
                 if (dist < min_dist) {
                     min_dist = dist;
-                    best_cluster_id = c;
+                    best_cluster_id = static_cast<int>(c);
                 }
             }
 
-            // 4c. Add this vector's ID to the correct inverted list
-            inverted_lists[best_cluster_id].push_back(id_data[i]);
+            // 4c. Add this vector's base-table ID to the correct inverted list
+            auto vec_id = id_data[i];
+            inverted_lists[best_cluster_id].push_back(vec_id);
             total_vectors_processed++;
+
+            // 4d. Compute PQ code for this vector using the trained codebooks
+            //     (encode independently per vector so codes are keyed by the base-table id)
+            std::vector<uint8_t> pq_code;
+            pq_code.reserve(pq_codebook.M);
+
+            int subdim = pq_codebook.subvector_dim;
+            for (int m = 0; m < pq_codebook.M; m++) {
+                const float *cb = pq_codebook.codebooks[m].data(); // Ks * subdim entries
+                const float *slice = current_vector.data() + m * subdim;
+
+                float best = std::numeric_limits<float>::max();
+                uint8_t best_k = 0;
+
+                for (int k = 0; k < pq_codebook.Ks; k++) {
+                    float dist = L2SquaredDistancePtr(slice, cb + k * subdim, subdim);
+                    if (dist < best) {
+                        best = dist;
+                        best_k = static_cast<uint8_t>(k);
+                    }
+                }
+
+                pq_code.push_back(best_k);
+            }
+
+            // Store PQ code keyed by the base-table id
+            pq_codes[vec_id] = std::move(pq_code);
         }
     }
 
@@ -463,21 +526,61 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
             list_appender.EndRow();
         }
         
-            list_appender.Close();
-            printf("Inverted lists persisted successfully.\n");
+        list_appender.Close();
+        printf("Inverted lists persisted successfully.\n");
 
-        // Persist index metadata for ann_search to discover the base table
-        auto create_meta_sql = StringUtil::Format(
-            "CREATE TABLE IF NOT EXISTS ivf_index_metadata (index_name VARCHAR, table_name VARCHAR, column_name VARCHAR)"
-        );
-        context.Query(create_meta_sql, false);
-        auto insert_meta_sql = StringUtil::Format(
-            "INSERT INTO ivf_index_metadata VALUES ('%s', '%s', '%s')",
-            index_name.c_str(), table_name.c_str(), column_name.c_str()
-        );
-        context.Query(insert_meta_sql, false);
+    // --- 6. Persist PQ codes (id BIGINT, code UBYTE[]) ---
+    printf("Persisting PQ codes...\n");
+    auto pq_codes_table_name = "ivf_pq_codes_" + index_name;
+    auto create_pqcodes_sql = StringUtil::Format(
+        "CREATE TABLE IF NOT EXISTS %s (id BIGINT, code UTINYINT[])",
+        pq_codes_table_name
+    );
+    auto create_pqcodes_result = context.Query(create_pqcodes_sql, false);
+    if (!create_pqcodes_result || !create_pqcodes_result->GetError().empty()) {
+        printf("Error creating PQ codes table: %s\n",
+               create_pqcodes_result ? create_pqcodes_result->GetError().c_str() : "null result");
+        result.SetVectorType(VectorType::CONSTANT_VECTOR);
+        ConstantVector::SetNull(result, true);
+        return;
+    }
 
-        printf("Finished scanning. Total vectors processed: %ld\n", total_vectors_processed);
+    {
+        Appender pq_appender(new_connection, "main", pq_codes_table_name);
+        for (auto &entry : pq_codes) {
+            int64_t vec_id = entry.first;
+            auto &code = entry.second;
+
+            std::vector<Value> code_vals;
+            code_vals.reserve(code.size());
+            for (auto b : code) {
+                // store as UTINYINT/UBYTE-friendly integer
+                code_vals.push_back(Value::UTINYINT(b));
+            }
+            auto code_array = Value::ARRAY(LogicalType::UTINYINT, std::move(code_vals));
+
+            pq_appender.BeginRow();
+            pq_appender.Append(Value::BIGINT(vec_id));
+            pq_appender.Append(std::move(code_array));
+            pq_appender.EndRow();
+        }
+        pq_appender.Close();
+    }
+
+    printf("PQ codes persisted successfully.\n");
+
+    // Persist index metadata for ann_search to discover the base table
+    auto create_meta_sql = StringUtil::Format(
+        "CREATE TABLE IF NOT EXISTS ivf_index_metadata (index_name VARCHAR, table_name VARCHAR, column_name VARCHAR)"
+    );
+    context.Query(create_meta_sql, false);
+    auto insert_meta_sql = StringUtil::Format(
+        "INSERT INTO ivf_index_metadata VALUES ('%s', '%s', '%s')",
+        index_name.c_str(), table_name.c_str(), column_name.c_str()
+    );
+    context.Query(insert_meta_sql, false);
+
+    printf("Finished scanning. Total vectors processed: %ld\n", total_vectors_processed);
 
     // Return a success message
     result.SetVectorType(VectorType::CONSTANT_VECTOR);
