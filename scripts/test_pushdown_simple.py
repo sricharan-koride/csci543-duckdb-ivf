@@ -11,16 +11,12 @@ Python ABI extension-load issues.
 """
 
 import os
-import subprocess
-import tempfile
 import duckdb
 import random
 import sys
 
 DB = 'sift_data.db'  # use the same DB as test_search.py when possible
-EXT_PATH = 'build/release/extension/ivf/ivf.duckdb_extension'
-DUCKDB_CLI = os.path.join('build', 'release', 'duckdb.exe')
-DIM = 8
+DIM = 128
 N = 12
 
 
@@ -47,57 +43,30 @@ def setup_db():
 
 
 def cli_create_index():
-    cli = DUCKDB_CLI if os.path.exists(DUCKDB_CLI) else 'duckdb'
-    ext = EXT_PATH.replace('\\', '/')
-    sql_create = f"LOAD '{ext}'; SELECT create_ivf_index('my_index', 'items', 'vec', 'id');"
-    try:
-        subprocess.check_call(f"{cli} {DB} -c \"{sql_create}\"", shell=True)
-        print('Index created via CLI')
-        return True
-    except subprocess.CalledProcessError as e:
-        print('Index creation failed:', e)
-        return False
+    con = con = duckdb.connect(DB, config={"allow_unsigned_extensions": "true"})
+    con.execute(f"LOAD 'build/release/extension/ivf/ivf.duckdb_extension'")
+    con.execute("SELECT create_ivf_index('my_index', 'items', 'vec', 'id')")
+    con.close()
+    print("Index created via Python API")
+    return True
 
 
 def cli_run_search_and_get_ids():
-    cli = DUCKDB_CLI if os.path.exists(DUCKDB_CLI) else 'duckdb'
-    ext = EXT_PATH.replace('\\', '/')
-    # extract a vector to use as query (first row) via Python API (no extension load)
-    con = duckdb.connect(DB)
+    con = con = duckdb.connect(DB, config={"allow_unsigned_extensions": "true"})
+    con.execute(f"LOAD 'build/release/extension/ivf/ivf.duckdb_extension'")
     row = con.execute("SELECT vec FROM items LIMIT 1").fetchone()
-    con.close()
     if not row:
         print('No vectors found in items table')
+        con.close()
         sys.exit(4)
     query_vec = row[0]
     dim = len(query_vec)
-    vec_str = ','.join(str(float(x)) for x in query_vec)
-    array_literal = f"ARRAY[{vec_str}]::FLOAT[{dim}]"
-    where_sql = "region = ''US''"
-
-    tmp_res = tempfile.NamedTemporaryFile(delete=False, suffix='.csv')
-    tmp_res.close()
-    search_sql = f"LOAD '{ext}'; COPY (SELECT id FROM ann_search('my_index', {array_literal}, 5, 2, where_clause=>'{where_sql}')) TO '{tmp_res.name.replace('\\','/')}' (FORMAT CSV, HEADER false);"
-    try:
-        subprocess.check_call(f"{cli} {DB} -c \"{search_sql}\"", shell=True)
-        with open(tmp_res.name, 'r') as f:
-            out = [l.strip() for l in f.read().splitlines() if l.strip()]
-        ids = []
-        for line in out:
-            try:
-                ids.append(int(line.split(',')[0]))
-            except Exception:
-                pass
-        return ids
-    except subprocess.CalledProcessError as e:
-        print('Search failed:', e)
-        # Treat search failure as test failure (do not silently return empty set)
-        sys.exit(3)
-    finally:
-        try:
-            os.remove(tmp_res.name)
-        except Exception:
-            pass
+    ids = [r[0] for r in con.execute(
+        f"SELECT id FROM ann_search('my_index', ?::FLOAT[{dim}], 5, 2, where_clause=>'region = ''US''')",
+        [query_vec]
+    ).fetchall()]
+    con.close()
+    return ids
 
 
 if __name__ == '__main__':
@@ -111,7 +80,7 @@ if __name__ == '__main__':
     print('ANN search returned ids:', ids)
 
     # verify these ids are subset of items with region='US'
-    con = duckdb.connect(DB)
+    con = con = duckdb.connect(DB, config={"allow_unsigned_extensions": "true"})
     us_ids = [r[0] for r in con.execute("SELECT id FROM items WHERE region = 'US'").fetchall()]
     con.close()
     print('Expected US ids:', us_ids)
