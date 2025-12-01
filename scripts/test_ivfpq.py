@@ -335,40 +335,28 @@ def main():
         # ---------------------------
         pq_index = f"ivfpq_{num_clusters}"
 
-        # if index_exists(con, pq_index):
-        #     print(f"Index '{pq_index}' already exists. Skipping build.")
-        #     pq_build_time = 0.0
-        #     pq_mem_mb = 0.0
-        # else:
-        #     pq_build_time, pq_mem_mb = build_index(con, pq_index, num_clusters, use_pq=True)
-        pq_build_time, pq_mem_mb = build_index(con, pq_index, num_clusters, use_pq=True)
-#        res_pq = eval_recall_latency(
-#            con,
-#            pq_index,
-#            queries,
-#            k=10,
-#            nprobe=DEFAULT_NPROBE,
-#            label=f"IVFPQ_{num_clusters}"
-#        )
-#        res_pq["num_clusters"] = num_clusters
-#        res_pq["index_type"] = "IVFPQ"
-#        res_pq["build_time_sec"] = pq_build_time
-#        all_results.append(res_pq)
-
+        if index_exists(con, pq_index):
+            print(f"Index '{pq_index}' already exists. Skipping build.")
+            pq_build_time = 0.0
+            pq_mem_mb = 0.0
+        else:
+            pq_build_time, pq_mem_mb = build_index(con, pq_index, num_clusters, use_pq=True)
+        # pq_build_time, pq_mem_mb = build_index(con, pq_index, num_clusters, use_pq=True)
         for nprobe_cap in NPROBE_SWEEP:
-            res_pq = eval_recall_latency(
-                con,
-                pq_index,
-                queries,
-                k=10,
-                nprobe=nprobe_cap,
-                label=f"IVFPQ_{num_clusters}_nprobe{nprobe_cap}"
-            )
-            res_pq["num_clusters"] = num_clusters
-            res_pq["index_type"] = "IVFPQ"
-            res_pq["build_time_sec"] = pq_build_time
-            res_pq["file_mb"] = pq_mem_mb
-            all_results.append(res_pq)
+            for k_val in [1, 10, 100]:
+                res_pq = eval_recall_latency(
+                    con,
+                    pq_index,
+                    queries,
+                    k=k_val,
+                    nprobe=nprobe_cap,
+                    label=f"IVFPQ_{num_clusters}_k{k_val}_nprobe{nprobe_cap}"
+                )
+                res_pq["num_clusters"] = num_clusters
+                res_pq["index_type"] = "IVFPQ"
+                res_pq["build_time_sec"] = pq_build_time
+                res_pq["file_mb"] = pq_mem_mb
+                all_results.append(res_pq)
 
 #        mem_pq = memory_profile(con, pq_index)
 #        mem_pq["num_clusters"] = num_clusters
@@ -390,6 +378,35 @@ def main():
 #    mem_df = pd.concat(mem_results, ignore_index=True) if mem_results else pd.DataFrame()
 #    print("\n==================== MEMORY PROFILE SUMMARY ====================")
 #    print(mem_df)
+
+    import matplotlib.pyplot as plt
+
+    # Plot Recall vs nprobe for k=1,10,100
+    for k_val in [1, 10, 100]:
+        plt.figure()
+        for num_clusters in CLUSTER_SWEEP:
+            sub = results_df[(results_df["k"] == k_val) & (results_df["num_clusters"] == num_clusters)]
+            plt.plot(sub["nprobe"], sub["recall_at_k"], marker="o", label=f"clusters={num_clusters}")
+        plt.title(f"Recall@{k_val} vs nprobe")
+        plt.xlabel("nprobe")
+        plt.ylabel("Recall")
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(f"recall_k{k_val}.png")
+
+    # Plot Latency vs nprobe for k=10
+    plt.figure()
+    for num_clusters in CLUSTER_SWEEP:
+        sub = results_df[(results_df["k"] == 10) & (results_df["num_clusters"] == num_clusters)]
+        plt.plot(sub["nprobe"], sub["avg_ann_ms"], marker="o", label=f"clusters={num_clusters}")
+    plt.title("ANN Latency vs nprobe (k=10)")
+    plt.xlabel("nprobe")
+    plt.ylabel("ANN Latency (ms)")
+    plt.grid(True)
+    plt.legend()
+    plt.savefig("latency_k10.png")
+
+    print("Saved plots: recall_k1.png, recall_k10.png, recall_k100.png, latency_k10.png")
 
     # Optionally: save to CSV for plotting
     results_df.to_csv("ivf_eval_results.csv", index=False)
