@@ -1,126 +1,377 @@
 import duckdb
 import time
 import numpy as np
+import pandas as pd
 
+# ============================================================
+# CONFIG
+# ============================================================
 DB = "sift_data.db"
 EXT = "build/release/extension/ivf/ivf.duckdb_extension"
 
-# -------------------------------
-# Connect + Load extension
-# -------------------------------
-con = duckdb.connect(DB, config={'allow_unsigned_extensions': 'true'})
-con.execute(f"LOAD '{EXT}'")
-print("Extension loaded.")
+BASE_TABLE = "sift_base"      # table with vectors
+VEC_COL    = "vec"            # vector column
+ID_COL     = "id"
 
-# -------------------------------
-# Confirm base table exists
-# -------------------------------
-print("\n--- Checking table schema ---")
-print(con.execute("PRAGMA table_info('sift_base')").df())
+# Cluster sizes to sweep
+CLUSTER_SWEEP = [1024, 2048, 4096]
 
+# nprobe to use for main evaluation (you can still sweep inside if needed)
+DEFAULT_NPROBE = 64
 
-# -------------------------------
-# STEP 1 — Recreate the IVF-PQ index
-# -------------------------------
-print("\n=== Building IVF-PQ Index ===")
-t0 = time.time()
+# Number of random query vectors to evaluate for recall
+NUM_QUERY_VECS = 100
 
-con.execute("""
-    SELECT create_ivf_index(
-        'my_index',
-        'sift_base',
-        'vec',
-        4096
-    )
-""")
-
-t1 = time.time()
-print(f"Index build time: {t1 - t0:.2f} sec")
+# Hybrid filter clauses to test (assumes your ann_search can see these columns)
+FILTER_CLAUSES = {
+    "no_filter": "",
+    "region_US": "region = 'US'",
+    "region_EU": "region = 'EU'",
+    "cat_Tech": "category = 'Tech'"
+}
 
 
-# -------------------------------
-# STEP 2 — Sanity check: PQ tables exist
-# -------------------------------
-print("\n--- Checking PQ tables ---")
-print(con.execute("SHOW TABLES").df())
+# ============================================================
+# HELPERS
+# ============================================================
+
+def connect_and_load():
+    con = duckdb.connect(DB, config={'allow_unsigned_extensions': 'true'})
+    con.execute(f"LOAD '{EXT}'")
+    print("Extension loaded.")
+    return con
 
 
-# -------------------------------
-# STEP 3 — Fetch one query vector
-# -------------------------------
-query = con.execute("SELECT vec FROM sift_base LIMIT 1").fetchone()[0]
-print("\n--- Query vector dimension:", len(query), "---")
+def check_base_schema(con):
+    print("\n--- Checking base table schema ---")
+    print(con.execute(f"PRAGMA table_info('{BASE_TABLE}')").df())
+
+def index_exists(con, index_name):
+    tables = con.execute("SHOW TABLES").fetchall()
+    table_names = [t[0] for t in tables]
+    return any(index_name in t for t in table_names)
 
 
-# -------------------------------
-# STEP 4 — IVF-PQ Search (nprobe sweep + k=100 candidates)
-# -------------------------------
-print("\n=== IVF-PQ Sweep (k=100 candidates) ===")
+def build_index(con, index_name, num_clusters, use_pq=True):
+    """
+    Build either IVFPQ or IVFFlat index, depending on use_pq flag.
 
-nprobes = [16, 32, 64, 128]
-sweep_results = []
-
-for npb in nprobes:
-    print(f"\n--- nprobe = {npb} ---")
+    NOTE: This assumes your create_ivf_index(...) function has a `use_pq` or
+    similar boolean parameter. If your actual signature differs, adjust the SQL
+    below accordingly.
+    """
+    print(f"\n=== Building index '{index_name}' (clusters={num_clusters}, use_pq={use_pq}) ===")
     t0 = time.time()
 
-    pq_rows = con.execute("""
-        SELECT *
-        FROM ann_search('my_index', ?::FLOAT[128], 100, ?)
-    """, [query, npb]).fetchall()
+    if use_pq:
+        # IVFPQ (compressed)
+        con.execute(f"""
+            SELECT create_ivf_index(
+                '{index_name}',
+                '{BASE_TABLE}',
+                '{VEC_COL}',
+                {num_clusters}
+            )
+        """)
+    else:
+        # Plain IVFFlat version (no PQ)
+        # If your function needs an explicit flag, change this to:
+        # SELECT create_ivf_index('{index_name}', '{BASE_TABLE}', '{VEC_COL}', {num_clusters}, FALSE)
+        con.execute(f"""
+            SELECT create_ivf_index(
+                '{index_name}',
+                '{BASE_TABLE}',
+                '{VEC_COL}',
+                {num_clusters}
+            )
+        """)
 
     elapsed = time.time() - t0
-    pq_ids_10 = [r[0] for r in pq_rows[:10]]
-    sweep_results.append((npb, elapsed, pq_ids_10))
-
-    print(f"IVF-PQ time: {elapsed:.4f} sec")
-    print("Top-10 IVF-PQ IDs:", pq_ids_10)
-
-# Store last pq_rows for recall check
-results_pq = pq_rows[:10]
+    print(f"Index build time: {elapsed:.2f} sec")
+    return elapsed
 
 
-# -------------------------------
-# STEP 5 — Exact Search for recall check
-# -------------------------------
-print("\n=== Running Exact Search (Baseline) ===")
-t0 = time.time()
+def sample_queries(con, num_queries):
+    """Sample a set of query vectors from the base table."""
+    print(f"\n--- Sampling {num_queries} query vectors ---")
+    rows = con.execute(f"""
+        SELECT {VEC_COL}
+        FROM {BASE_TABLE}
+        USING SAMPLE {num_queries} ROWS (RESERVOIR)
+    """).fetchall()
 
-results_exact = con.execute("""
-    SELECT id, vec <-> ? AS dist
-    FROM sift_base
-    ORDER BY dist
-    LIMIT 10
-""", [query]).fetchall()
-
-t1 = time.time()
-print(f"Exact search time: {t1 - t0:.4f} sec")
+    queries = [r[0] for r in rows]
+    print(f"Sampled {len(queries)} query vectors.")
+    return queries
 
 
-# -------------------------------
-# STEP 6 — Recall@K
-# -------------------------------
-exact_ids = [r[0] for r in results_exact]
-pq_ids    = [r[0] for r in results_pq]
+def exact_search_topk(con, query_vec, k):
+    """Run full-scan exact search for a single query."""
+    rows = con.execute(f"""
+        SELECT {ID_COL}, {VEC_COL} <-> ? AS dist
+        FROM {BASE_TABLE}
+        ORDER BY dist
+        LIMIT {k}
+    """, [query_vec]).fetchall()
+    return [r[0] for r in rows]
 
-recall = len(set(exact_ids) & set(pq_ids)) / len(exact_ids)
-print(f"\nRecall@10 = {recall*100:.2f}%")
-print("Exact IDs:", exact_ids)
-print("PQ IDs:   ", pq_ids)
+
+def ann_search_topk(con, index_name, query_vec, k, nprobe, where_clause=""):
+    """
+    Run ann_search on a single query.
+    where_clause is a SQL fragment applied *inside* ann_search via parameter,
+    assuming your table function supports a where_clause or filter parameter.
+    """
+    if where_clause:
+        # Escape single quotes inside the where_clause for SQL safety
+        escaped_clause = where_clause.replace("'", "''")
+        sql = f"""
+            SELECT *
+            FROM ann_search(
+                '{index_name}',
+                ?::FLOAT[128],
+                {k},
+                {nprobe},
+                where_clause := '{escaped_clause}'
+            )
+        """
+    else:
+        sql = f"""
+            SELECT *
+            FROM ann_search(
+                '{index_name}',
+                ?::FLOAT[128],
+                {k},
+                {nprobe}
+            )
+        """
+
+    rows = con.execute(sql, [query_vec]).fetchall()
+    # Assume first column is ID
+    return [r[0] for r in rows]
 
 
-# -------------------------------
-# STEP 7 — Test hybrid WHERE filter
-# -------------------------------
-print("\n=== Testing Hybrid Filtering ===")
-filtered = con.execute("""
-    SELECT *
-    FROM ann_search(
-        'my_index',
-        ?::FLOAT[128],
-        5, 32,
-        where_clause := 'region=''US'''
-    )
-""", [query]).fetchall()
+def eval_recall_latency(con, index_name, queries, k, nprobe, label=""):
+    """
+    Compute average Recall@k and latency over a batch of query vectors.
+    """
+    print(f"\n=== Evaluating {label} (index={index_name}, k={k}, nprobe={nprobe}) ===")
 
-print("Filtered results:", filtered)
+    exact_total_time = 0.0
+    ann_total_time = 0.0
+    total_recall = 0.0
+
+    for i, q in enumerate(queries):
+        # Exact
+        t0 = time.time()
+        exact_ids = exact_search_topk(con, q, k)
+        exact_total_time += (time.time() - t0)
+
+        # ANN
+        t0 = time.time()
+        ann_ids = ann_search_topk(con, index_name, q, k, nprobe)
+        ann_total_time += (time.time() - t0)
+
+        # Recall@k
+        inter = len(set(exact_ids) & set(ann_ids))
+        total_recall += inter / float(len(exact_ids))
+
+        if (i + 1) % max(1, len(queries)//10) == 0:
+            print(f"  Processed {i+1}/{len(queries)} queries...")
+
+    avg_exact = exact_total_time / len(queries)
+    avg_ann = ann_total_time / len(queries)
+    avg_recall = total_recall / len(queries)
+
+    print(f"Average exact latency: {avg_exact*1000:.2f} ms")
+    print(f"Average ANN   latency: {avg_ann*1000:.2f} ms")
+    print(f"Average Recall@{k}: {avg_recall*100:.2f}%")
+
+    return {
+        "index_name": index_name,
+        "label": label,
+        "k": k,
+        "nprobe": nprobe,
+        "avg_exact_ms": avg_exact * 1000.0,
+        "avg_ann_ms": avg_ann * 1000.0,
+        "recall_at_k": avg_recall
+    }
+
+
+def eval_filter_selectivity(con, index_name, query_vec, k, nprobe):
+    """
+    Evaluate latency under different hybrid filters for a **single** query vector
+    just to understand relative speedups.
+    """
+    print(f"\n=== Hybrid Filter Selectivity (index={index_name}) ===")
+    rows = []
+
+    # No filter baseline (pure ANN)
+    t0 = time.time()
+    base_ids = ann_search_topk(con, index_name, query_vec, k, nprobe, where_clause="")
+    base_time = time.time() - t0
+    base_count = len(base_ids)
+    print(f"no_filter: time={base_time:.4f} sec, results={base_count}")
+
+    rows.append({
+        "filter": "no_filter",
+        "latency_sec": base_time,
+        "result_count": base_count,
+        "speedup_vs_no_filter": 1.0
+    })
+
+    # With filters
+    for name, clause in FILTER_CLAUSES.items():
+        if name == "no_filter":
+            continue
+        t0 = time.time()
+        ids = ann_search_topk(con, index_name, query_vec, k, nprobe, where_clause=clause)
+        t1 = time.time()
+        elapsed = t1 - t0
+        count = len(ids)
+        speedup = base_time / elapsed if elapsed > 0 else float("inf")
+
+        print(f"{name}: WHERE {clause} → time={elapsed:.4f} sec, results={count}, speedup={speedup:.2f}x")
+
+        rows.append({
+            "filter": name,
+            "latency_sec": elapsed,
+            "result_count": count,
+            "speedup_vs_no_filter": speedup
+        })
+
+    return pd.DataFrame(rows)
+
+
+def memory_profile(con, index_name):
+    """
+    Memory/storage profiling:
+    1. SHOW TABLES to find all physical tables.
+    2. Filter tables whose names contain the index prefix.
+    3. Run PRAGMA storage_info('<table>') for each.
+    4. Aggregate compressed and uncompressed sizes.
+    """
+    print(f"\n=== Memory Profile for index '{index_name}' ===")
+
+    # 1. List all tables
+    tables = con.execute("SHOW TABLES").fetchall()
+    table_names = [t[0] for t in tables]
+
+    # 2. Filter tables belonging to this index
+    related = [t for t in table_names if index_name in t]
+
+    if not related:
+        print(f"No physical tables found for index prefix '{index_name}'.")
+        return pd.DataFrame()
+
+    rows = []
+
+    # 3. Run storage_info for each matching table
+    for tbl in related:
+        try:
+            df = con.execute(f"PRAGMA storage_info('{tbl}')").df()
+            if not df.empty:
+                if "total_compressed_size" in df.columns and "total_size" in df.columns:
+                    # DuckDB >= 1.6.x
+                    total_compressed = df["total_compressed_size"].sum()
+                    total_uncompressed = df["total_size"].sum()
+                else:
+                    # DuckDB <= 1.4.x fallback
+                    if "segment_size" in df.columns:
+                        total_compressed = df["segment_size"].sum()
+                        total_uncompressed = df["segment_size"].sum()
+                    else:
+                        total_compressed = 0
+                        total_uncompressed = 0
+
+                rows.append({
+                    "table": tbl,
+                    "compressed_mb": total_compressed / (1024 * 1024),
+                    "uncompressed_mb": total_uncompressed / (1024 * 1024)
+                })
+        except Exception as e:
+            print(f"Error reading storage_info for {tbl}: {e}")
+
+    mem_df = pd.DataFrame(rows)
+
+    print("\nPer-table size (MB):")
+    print(mem_df)
+
+    print("\nTotal index size (MB):")
+    print(mem_df[["compressed_mb", "uncompressed_mb"]].sum())
+
+    return mem_df
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    con = connect_and_load()
+    check_base_schema(con)
+
+    # Sample queries for recall evaluation
+    queries = sample_queries(con, NUM_QUERY_VECS)
+
+    all_results = []
+    mem_results = []
+
+    # For filter selectivity, just use the first query vector
+    filter_query = queries[0] if queries else None
+
+    for num_clusters in CLUSTER_SWEEP:
+
+        # ---------------------------
+        # 2) IVFPQ (with PQ)
+        # ---------------------------
+        pq_index = f"ivfpq_{num_clusters}"
+
+        if index_exists(con, pq_index):
+            print(f"Index '{pq_index}' already exists. Skipping build.")
+            pq_build_time = 0.0
+        else:
+            pq_build_time = build_index(con, pq_index, num_clusters, use_pq=True)
+
+        res_pq = eval_recall_latency(
+            con,
+            pq_index,
+            queries,
+            k=10,
+            nprobe=DEFAULT_NPROBE,
+            label=f"IVFPQ_{num_clusters}"
+        )
+        res_pq["num_clusters"] = num_clusters
+        res_pq["index_type"] = "IVFPQ"
+        res_pq["build_time_sec"] = pq_build_time
+        all_results.append(res_pq)
+
+        mem_pq = memory_profile(con, pq_index)
+        mem_pq["num_clusters"] = num_clusters
+        mem_pq["index_type"] = "IVFPQ"
+        mem_results.append(mem_pq)
+
+        if filter_query is not None:
+            df_filters_pq = eval_filter_selectivity(con, pq_index, filter_query, k=10, nprobe=DEFAULT_NPROBE)
+            print("\nFilter selectivity (IVFPQ) summary:")
+            print(df_filters_pq)
+
+    # --------------------------------------------------------
+    # Final summary tables
+    # --------------------------------------------------------
+    results_df = pd.DataFrame(all_results)
+    print("\n==================== OVERALL ANN RESULTS ====================")
+    print(results_df)
+
+    mem_df = pd.concat(mem_results, ignore_index=True) if mem_results else pd.DataFrame()
+    print("\n==================== MEMORY PROFILE SUMMARY ====================")
+    print(mem_df)
+
+    # Optionally: save to CSV for plotting
+    results_df.to_csv("ivf_eval_results.csv", index=False)
+    mem_df.to_csv("ivf_memory_profile.csv", index=False)
+    print("\nSaved ivf_eval_results.csv and ivf_memory_profile.csv.")
+
+
+if __name__ == "__main__":
+    main()

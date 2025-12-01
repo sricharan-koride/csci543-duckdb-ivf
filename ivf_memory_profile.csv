@@ -1,0 +1,13 @@
+table,compressed_mb,uncompressed_mb,num_clusters,index_type
+ivf_centroids_ivfpq_1024,0.0,0.0,1024,IVFPQ
+ivf_lists_ivfpq_1024,0.0,0.0,1024,IVFPQ
+ivf_pq_codebooks_ivfpq_1024,0.0,0.0,1024,IVFPQ
+ivf_pq_codes_ivfpq_1024,0.0,0.0,1024,IVFPQ
+ivf_centroids_ivfpq_2048,0.0,0.0,2048,IVFPQ
+ivf_lists_ivfpq_2048,0.0,0.0,2048,IVFPQ
+ivf_pq_codebooks_ivfpq_2048,0.0,0.0,2048,IVFPQ
+ivf_pq_codes_ivfpq_2048,0.0,0.0,2048,IVFPQ
+ivf_centroids_ivfpq_4096,0.0,0.0,4096,IVFPQ
+ivf_lists_ivfpq_4096,0.0,0.0,4096,IVFPQ
+ivf_pq_codebooks_ivfpq_4096,0.0,0.0,4096,IVFPQ
+ivf_pq_codes_ivfpq_4096,0.0,0.0,4096,IVFPQ
