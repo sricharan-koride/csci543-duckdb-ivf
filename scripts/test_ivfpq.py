@@ -30,7 +30,7 @@ con.execute("""
         'my_index',
         'sift_base',
         'vec',
-        1024
+        4096
     )
 """)
 

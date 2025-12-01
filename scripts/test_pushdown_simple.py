@@ -45,7 +45,7 @@ def setup_db():
 def cli_create_index():
     con = con = duckdb.connect(DB, config={"allow_unsigned_extensions": "true"})
     con.execute(f"LOAD 'build/release/extension/ivf/ivf.duckdb_extension'")
-    con.execute("SELECT create_ivf_index('my_index', 'items', 'vec', 'id')")
+    con.execute("SELECT create_ivf_index('my_index', 'items', 'vec', 1024)")
     con.close()
     print("Index created via Python API")
     return True
