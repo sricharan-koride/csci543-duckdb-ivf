@@ -2,6 +2,7 @@ import duckdb
 import time
 import numpy as np
 import pandas as pd
+import os
 
 # ============================================================
 # CONFIG
@@ -22,12 +23,15 @@ DEFAULT_NPROBE = 64
 # Number of random query vectors to evaluate for recall
 NUM_QUERY_VECS = 100
 
+NPROBE_SWEEP = [32, 64, 128, 256]
+
 # Hybrid filter clauses to test (assumes your ann_search can see these columns)
 FILTER_CLAUSES = {
     "no_filter": "",
     "region_US": "region = 'US'",
     "region_EU": "region = 'EU'",
-    "cat_Tech": "category = 'Tech'"
+    "category_Tech": "category = 'Tech'",
+    "category_Fashion": "category = 'Fashion'"
 }
 
 
@@ -62,6 +66,7 @@ def build_index(con, index_name, num_clusters, use_pq=True):
     """
     print(f"\n=== Building index '{index_name}' (clusters={num_clusters}, use_pq={use_pq}) ===")
     t0 = time.time()
+    before_size = os.path.getsize(DB)
 
     if use_pq:
         # IVFPQ (compressed)
@@ -86,9 +91,12 @@ def build_index(con, index_name, num_clusters, use_pq=True):
             )
         """)
 
+    after_size = os.path.getsize(DB)
+    delta_mb = (after_size - before_size) / (1024 * 1024)
     elapsed = time.time() - t0
     print(f"Index build time: {elapsed:.2f} sec")
-    return elapsed
+    print(f"DB size increased by: {delta_mb:.2f} MB")
+    return elapsed, delta_mb
 
 
 def sample_queries(con, num_queries):
@@ -315,7 +323,7 @@ def main():
     queries = sample_queries(con, NUM_QUERY_VECS)
 
     all_results = []
-    mem_results = []
+#    mem_results = []
 
     # For filter selectivity, just use the first query vector
     filter_query = queries[0] if queries else None
@@ -327,29 +335,45 @@ def main():
         # ---------------------------
         pq_index = f"ivfpq_{num_clusters}"
 
-        if index_exists(con, pq_index):
-            print(f"Index '{pq_index}' already exists. Skipping build.")
-            pq_build_time = 0.0
-        else:
-            pq_build_time = build_index(con, pq_index, num_clusters, use_pq=True)
+        # if index_exists(con, pq_index):
+        #     print(f"Index '{pq_index}' already exists. Skipping build.")
+        #     pq_build_time = 0.0
+        #     pq_mem_mb = 0.0
+        # else:
+        #     pq_build_time, pq_mem_mb = build_index(con, pq_index, num_clusters, use_pq=True)
+        pq_build_time, pq_mem_mb = build_index(con, pq_index, num_clusters, use_pq=True)
+#        res_pq = eval_recall_latency(
+#            con,
+#            pq_index,
+#            queries,
+#            k=10,
+#            nprobe=DEFAULT_NPROBE,
+#            label=f"IVFPQ_{num_clusters}"
+#        )
+#        res_pq["num_clusters"] = num_clusters
+#        res_pq["index_type"] = "IVFPQ"
+#        res_pq["build_time_sec"] = pq_build_time
+#        all_results.append(res_pq)
 
-        res_pq = eval_recall_latency(
-            con,
-            pq_index,
-            queries,
-            k=10,
-            nprobe=DEFAULT_NPROBE,
-            label=f"IVFPQ_{num_clusters}"
-        )
-        res_pq["num_clusters"] = num_clusters
-        res_pq["index_type"] = "IVFPQ"
-        res_pq["build_time_sec"] = pq_build_time
-        all_results.append(res_pq)
+        for nprobe_cap in NPROBE_SWEEP:
+            res_pq = eval_recall_latency(
+                con,
+                pq_index,
+                queries,
+                k=10,
+                nprobe=nprobe_cap,
+                label=f"IVFPQ_{num_clusters}_nprobe{nprobe_cap}"
+            )
+            res_pq["num_clusters"] = num_clusters
+            res_pq["index_type"] = "IVFPQ"
+            res_pq["build_time_sec"] = pq_build_time
+            res_pq["file_mb"] = pq_mem_mb
+            all_results.append(res_pq)
 
-        mem_pq = memory_profile(con, pq_index)
-        mem_pq["num_clusters"] = num_clusters
-        mem_pq["index_type"] = "IVFPQ"
-        mem_results.append(mem_pq)
+#        mem_pq = memory_profile(con, pq_index)
+#        mem_pq["num_clusters"] = num_clusters
+#        mem_pq["index_type"] = "IVFPQ"
+#        mem_results.append(mem_pq)
 
         if filter_query is not None:
             df_filters_pq = eval_filter_selectivity(con, pq_index, filter_query, k=10, nprobe=DEFAULT_NPROBE)
@@ -363,13 +387,13 @@ def main():
     print("\n==================== OVERALL ANN RESULTS ====================")
     print(results_df)
 
-    mem_df = pd.concat(mem_results, ignore_index=True) if mem_results else pd.DataFrame()
-    print("\n==================== MEMORY PROFILE SUMMARY ====================")
-    print(mem_df)
+#    mem_df = pd.concat(mem_results, ignore_index=True) if mem_results else pd.DataFrame()
+#    print("\n==================== MEMORY PROFILE SUMMARY ====================")
+#    print(mem_df)
 
     # Optionally: save to CSV for plotting
     results_df.to_csv("ivf_eval_results.csv", index=False)
-    mem_df.to_csv("ivf_memory_profile.csv", index=False)
+#    mem_df.to_csv("ivf_memory_profile.csv", index=False)
     print("\nSaved ivf_eval_results.csv and ivf_memory_profile.csv.")
 
 

@@ -189,14 +189,17 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
             printf("IVF-PQ disabled (falling back to exact L2): %s\n", e.what());
         }
 
-        // Priority Queue for Top-K results
-        using ResultPair = std::pair<float, int64_t>;
-        std::priority_queue<ResultPair> top_k_heap;
+        struct Candidate {
+            int64_t id;
+            float pq_dist;
+            std::vector<float> full_vec;
+        };
+        std::vector<Candidate> all_candidates;
 
         // --- ADAPTIVE SCAN LOOP ---
         size_t clusters_scanned = 0;
         size_t total_clusters = cluster_distances.size();
-        int current_nprobe_increment = bind_data.nprobe; // Start with user's nprobe
+        int current_nprobe_increment = std::max(8, bind_data.nprobe / 4); // Adaptive start (1/4 of nprobe, min 8)
 
         while (clusters_scanned < total_clusters) {
             
@@ -279,38 +282,54 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
                                 candidate_vec.push_back(float_data[i * array_size + j]);
                             }
                             dist = L2SquaredDistance(bind_data.query_vector, candidate_vec);
+                            // Save full vector for later refinement
+                            all_candidates.push_back({candidate_id, dist, std::move(candidate_vec)});
+                            continue;
                         }
 
-                        if (top_k_heap.size() < (size_t)bind_data.k) {
-                            top_k_heap.push({dist, candidate_id});
-                        } else if (dist < top_k_heap.top().first) {
-                            top_k_heap.pop();
-                            top_k_heap.push({dist, candidate_id});
+                        // Save full vector for later refinement
+                        std::vector<float> candidate_vec;
+                        candidate_vec.reserve(array_size);
+                        for (idx_t j = 0; j < array_size; j++) {
+                            candidate_vec.push_back(float_data[i * array_size + j]);
                         }
+                        all_candidates.push_back({candidate_id, dist, std::move(candidate_vec)});
                     }
                 }
             }
 
-            // 4. Adaptive Check: Do we have enough results?
+            // 4. Adaptive Check: increment nprobe increment
+            current_nprobe_increment = std::min(current_nprobe_increment * 2, bind_data.nprobe);
             clusters_scanned = end_idx;
-            if (top_k_heap.size() >= (size_t)bind_data.k) {
-                // Success! We found k valid items. Stop scanning.
-                // printf("Adaptive Search: Found %zu results. Stopping early.\n", top_k_heap.size());
-                break;
-            } else {
-                // Not enough results. Expand search!
-                // printf("Adaptive Search: Only found %zu results. Expanding search...\n", top_k_heap.size());
-                // We keep the increment same (scan next 5, then next 5...)
-            }
         }
 
-        // Finalize Results
-        while (!top_k_heap.empty()) {
-            auto item = top_k_heap.top();
-            state.final_results.push_back({item.second, item.first});
-            top_k_heap.pop();
+        // --- Refinement Stage: PQ → L2 re-ranking ---
+        // Sort by PQ distance
+        std::sort(all_candidates.begin(), all_candidates.end(),
+                  [](const Candidate &a, const Candidate &b){ return a.pq_dist < b.pq_dist; });
+
+        // Take top-R (200) for refinement
+        size_t R = std::min<size_t>(200, all_candidates.size());
+        using ResultPair = std::pair<float, int64_t>;
+        std::vector<ResultPair> refined;
+        refined.reserve(R);
+
+        for (size_t i = 0; i < R; i++) {
+            float exact_dist = L2SquaredDistance(bind_data.query_vector, all_candidates[i].full_vec);
+            refined.push_back({exact_dist, all_candidates[i].id});
         }
-        std::reverse(state.final_results.begin(), state.final_results.end());
+
+        // Sort by exact distance
+        std::sort(refined.begin(), refined.end(),
+                  [](const ResultPair &a, const ResultPair &b){ return a.first < b.first; });
+
+        // Take top-k final neighbors
+        size_t K = bind_data.k;
+        size_t final_k = std::min(K, refined.size());
+        for (size_t i = 0; i < final_k; i++) {
+            state.final_results.push_back({refined[i].second, refined[i].first});
+        }
+
         state.is_done = true;
     }
 
