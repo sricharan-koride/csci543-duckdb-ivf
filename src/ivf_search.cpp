@@ -13,7 +13,7 @@
 
 namespace duckdb {
 
-// --- Helper: L2 Distance ---
+// L2 Distance
 static float L2SquaredDistance(const std::vector<float>& a, const std::vector<float>& b) {
     float sum = 0;
     size_t dim = a.size();
@@ -32,7 +32,7 @@ unique_ptr<FunctionData> BindIVFSearch(ClientContext &context, TableFunctionBind
     auto result = make_uniq<IVFSearchFunctionData>();
     result->index_name = input.inputs[0].ToString();
     
-    // Parse Query Vector (accept either a fixed-size ARRAY or a variable-length LIST)
+    // Parse Query Vector
     auto query_val = input.inputs[1];
     const vector<Value> *children_ptr = nullptr;
     if (query_val.type().id() == LogicalTypeId::LIST) {
@@ -87,11 +87,10 @@ void LoadCentroids(ClientContext &context, const string &index_name, std::vector
         auto &vector_col = chunk->data[0];
         auto row_count = chunk->size();
         
-        // FIX: Infer dimension from the data itself for the first batch, or hardcode 128
         // Here we look at the child vector length vs row count
         auto &child_vec = ListVector::GetEntry(vector_col);
         idx_t child_len = ListVector::GetListSize(vector_col);
-        idx_t array_size = (row_count > 0) ? (child_len / row_count) : 128; // Fallback
+        idx_t array_size = (row_count > 0) ? (child_len / row_count) : 128;
         
         child_vec.Flatten(row_count * array_size);
         auto float_data = FlatVector::GetData<float>(child_vec);
@@ -126,7 +125,6 @@ unique_ptr<GlobalTableFunctionState> InitIVFSearch(ClientContext &context, Table
 
     try {
         LoadCentroids(new_context, bind_data.index_name, state->centroids);
-        // printf("Loaded %zu centroids.\n", state->centroids.size());
     } catch (std::exception &e) {
         printf("Error loading index: %s\n", e.what());
     }
@@ -149,7 +147,7 @@ unique_ptr<GlobalTableFunctionState> InitIVFSearch(ClientContext &context, Table
             }
         }
     } catch (...) {
-        // ignore metadata load failures; defaulting to empty -> caller must handle
+        
     }
 
     return std::move(state);
@@ -159,19 +157,19 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
     auto &state = data_p.global_state->Cast<IVFSearchGlobalState>();
     auto &bind_data = data_p.bind_data->Cast<IVFSearchFunctionData>();
 
-    // --- STEP 1: Perform Search (Only once) ---
+    // Perform Search (Only once)
     if (state.current_offset == 0 && state.final_results.empty() && !state.is_done) {
         
-        // A. PROBE: Calculate distance to ALL centroids first
+        // Calculate distance to ALL centroids first
         std::vector<std::pair<float, int>> cluster_distances;
         for (int i = 0; i < (int)state.centroids.size(); i++) {
             float dist = L2SquaredDistance(bind_data.query_vector, state.centroids[i]);
             cluster_distances.push_back({dist, i});
         }
-        // Sort centroids by distance (closest first)
+        // Sort centroids by distance
         std::sort(cluster_distances.begin(), cluster_distances.end());
 
-        // --- IVF-PQ: Load PQ structures and build LUT for this query (if available) ---
+        // IVF-PQ: Load PQ structures and build LUT for this query
         PQCodebook pq_codebook;
         std::vector<std::vector<uint8_t>> pq_codes;
         std::vector<std::vector<float>> pq_lut;
@@ -183,9 +181,8 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
             LoadPQCodes(context, bind_data.index_name, pq_codes);
             BuildPQDistanceLUT(bind_data.query_vector, pq_codebook, pq_lut);
             pq_available = true;
-            // printf("IVF-PQ enabled: M=%d, Ks=%d, codes=%zu\n", pq_codebook.M, pq_codebook.Ks, pq_codes.size());
         } catch (std::exception &e) {
-            // If anything fails (no PQ tables, etc.), fall back to exact L2
+            // If anything fails, fall back to exact L2
             printf("IVF-PQ disabled (falling back to exact L2): %s\n", e.what());
         }
 
@@ -196,14 +193,14 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
         };
         std::vector<Candidate> all_candidates;
 
-        // --- ADAPTIVE SCAN LOOP ---
+        // ADAPTIVE SCAN LOOP
         size_t clusters_scanned = 0;
         size_t total_clusters = cluster_distances.size();
         int current_nprobe_increment = std::max(8, bind_data.nprobe / 4); // Adaptive start (1/4 of nprobe, min 8)
 
         while (clusters_scanned < total_clusters) {
             
-            // 1. Identify which clusters to scan in this batch
+            // Identify which clusters to scan in this batch
             size_t end_idx = std::min(clusters_scanned + current_nprobe_increment, total_clusters);
             if (end_idx == clusters_scanned) break;
 
@@ -216,10 +213,7 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
                 if (i < end_idx - 1) cluster_list_str += ",";
             }
 
-            // Debug: See it adapting
-            // printf("Adaptive Scan: Checking clusters rank %zu to %zu...\n", clusters_scanned, end_idx);
-
-            // 2. Execute SQL for this batch
+            // Execute SQL for this batch
             // Choose base table from metadata if available, otherwise fall back to 'sift_base'
             string base_table = state.base_table.empty() ? string("sift_base") : state.base_table;
             string sql = StringUtil::Format(
@@ -228,7 +222,7 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
                 "ON s.id = c.vid", 
                 base_table.c_str(), bind_data.index_name.c_str(), cluster_list_str.c_str()
             );
-            // Append optional where clause (safe-guarded by optimizer)
+            // Append optional where clause 
             if (state.has_where && !state.where_clause.empty()) {
                 sql += " WHERE ";
                 sql += state.where_clause;
@@ -237,7 +231,7 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
             Connection search_conn(*db);
             auto query_result = search_conn.context->Query(sql, false);
 
-            // 3. Process Candidates
+            // Process Candidates
             if (query_result && query_result->GetError().empty()) {
                 while (auto chunk = query_result->Fetch()) {
                     if (!chunk || chunk->size() == 0) break;
@@ -256,14 +250,14 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
                     for (idx_t i = 0; i < row_count; i++) {
                         int64_t candidate_id = id_data[i];
 
-                        // Gatekeeper (Filter)
+                        // Gatekeeper
                         if (state.has_filter) {
                             if (state.allowed_ids.find(candidate_id) == state.allowed_ids.end()) {
                                 continue; 
                             }
                         }
 
-                        // Distance Calculation: prefer IVF-PQ, fall back to exact L2 if needed
+                        // Distance Calculation
                         float dist = 0.0f;
                         bool used_pq = false;
 
@@ -275,7 +269,7 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
                             dist = PQDistance(pq_codes[static_cast<idx_t>(candidate_id)], pq_lut);
                             used_pq = true;
                         } else {
-                            // Fallback: reconstruct full vector and compute exact L2 distance
+                            // Fallback
                             std::vector<float> candidate_vec;
                             candidate_vec.reserve(array_size);
                             for (idx_t j = 0; j < array_size; j++) {
@@ -298,17 +292,16 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
                 }
             }
 
-            // 4. Adaptive Check: increment nprobe increment
+            // Adaptive Check
             current_nprobe_increment = std::min(current_nprobe_increment * 2, bind_data.nprobe);
             clusters_scanned = end_idx;
         }
 
-        // --- Refinement Stage: PQ → L2 re-ranking ---
         // Sort by PQ distance
         std::sort(all_candidates.begin(), all_candidates.end(),
                   [](const Candidate &a, const Candidate &b){ return a.pq_dist < b.pq_dist; });
 
-        // Take top-R (200) for refinement
+        // Take top-R for refinement
         size_t R = std::min<size_t>(200, all_candidates.size());
         using ResultPair = std::pair<float, int64_t>;
         std::vector<ResultPair> refined;
@@ -333,7 +326,7 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
         state.is_done = true;
     }
 
-    // --- STEP 2: Stream Results ---
+    // Stream Results
     idx_t remaining = state.final_results.size() - state.current_offset;
     if (remaining == 0) {
         output.SetCardinality(0);
@@ -357,4 +350,4 @@ void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataCh
     state.current_offset += count;
 }
 
-} // namespace duckdb
+}

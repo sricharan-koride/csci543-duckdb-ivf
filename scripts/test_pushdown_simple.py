@@ -15,16 +15,16 @@ import duckdb
 import random
 import sys
 
-DB = 'sift_data.db'  # use the same DB as test_search.py when possible
+DB = 'sift_data.db' 
 DIM = 128
 N = 12
 
 
 def setup_db():
     con = duckdb.connect(DB)
-    # If a table named 'items' already exists in this DB (e.g. from other tests), reuse it.
+    # If a table named 'items' already exists in this DB, reuse it.
     tbls = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()] if False else []
-    # DuckDB doesn't have sqlite_master; use a safe existence check
+    # DuckDB doesn't have sqlite_master
     try:
         exists = con.execute("SELECT 1 FROM information_schema.tables WHERE table_name='items'").fetchone()
     except Exception:
@@ -34,7 +34,7 @@ def setup_db():
         con.execute("CREATE OR REPLACE TABLE items(id BIGINT, vec FLOAT[], region VARCHAR)")
         for i in range(N):
             vec = [random.random() for _ in range(DIM)]
-            region = 'US' if (i % 3 != 0) else 'EU'  # roughly 2/3 US, 1/3 EU
+            region = 'US' if (i % 3 != 0) else 'EU' 
             con.execute('INSERT INTO items VALUES (?, ?, ?)', [i, vec, region])
         print('Created sample table items with', N, 'rows in', DB)
     else:
@@ -84,7 +84,7 @@ if __name__ == '__main__':
     us_ids = [r[0] for r in con.execute("SELECT id FROM items WHERE region = 'US'").fetchall()]
     con.close()
     print('Expected US ids:', us_ids)
-    # Fail if search returned no ids — this is unexpected for the smoke test
+    # Fail if search returned no ids
     if len(ids) == 0:
         print('TEST FAILED: Search returned no ids. Likely degenerate index (too few samples) or faulty clustering')
         sys.exit(1)

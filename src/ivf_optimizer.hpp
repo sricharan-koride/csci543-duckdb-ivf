@@ -11,4 +11,4 @@ public:
     static void Optimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
 };
 
-} // namespace duckdb
+}

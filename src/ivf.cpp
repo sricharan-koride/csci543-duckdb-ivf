@@ -10,7 +10,7 @@
 #include "pq.hpp"
 #include <cstdint>
 
-// --- ADD THESE HEADERS FOR K-MEANS ---
+// ADD THESE HEADERS FOR K-MEANS 
 #include "kmeans/Kmeans.hpp"
 #include "kmeans/SimpleMatrix.hpp"
 #include <random>
@@ -18,18 +18,16 @@
 #include "duckdb/main/appender.hpp"
 #include "duckdb/common/types/value.hpp"
 
-#include <cmath>   // For sqrt
-#include <limits>  // For std::numeric_limits
+#include <cmath>   
+#include <limits>  
 #include <map>
 
 
 namespace duckdb {
-// --- (Anonymous namespace for helper functions) ---
 namespace {
 
 // Helper function to compute L2 (Euclidean) distance
 // We use squared distance to avoid the expensive sqrt()
-// which is fine for finding the *nearest* neighbor
 float L2SquaredDistance(const std::vector<float>& a, const std::vector<float>& b) {
     float sum = 0;
     size_t dim = a.size();
@@ -50,24 +48,24 @@ float L2SquaredDistancePtr(const float *a, const float *b, size_t dim) {
     return sum;
 }
 
-} // namespace (anonymous)
-// --- End of helper functions ---
+}
+
 void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
-    // 1. Get the arguments
+    // Get the arguments
     auto index_name = args.GetValue(0, 0).ToString();
     auto table_name = args.GetValue(1, 0).ToString();
     auto column_name = args.GetValue(2, 0).ToString();
     printf("CreateIVFIndex called:\n");
     printf("  Index Name: %s\n", index_name.c_str());
-    printf("  Table Name: %s\n", table_name.c_str()); // <-- FIX 1: c_st() -> c_str()
+    printf("  Table Name: %s\n", table_name.c_str()); 
     printf("  Column Name: %s\n", column_name.c_str());
 
-    // 2. Create a new, independent connection
+    // Create a new, independent connection
     auto &db = state.GetContext().db;
     Connection new_connection(*db);
     auto &context = *new_connection.context;
 
-    // 3. Construct and run the sample query
+    // Construct and run the sample query
     auto sample_query = StringUtil::Format(
         "SELECT %s FROM %s USING SAMPLE 10 PERCENT (BERNOULLI)",
         column_name, table_name
@@ -76,7 +74,7 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
 
     auto query_result = context.Query(sample_query, false);
 
-    // 4. Check for query error
+    // Check for query error
     if (!query_result || !query_result->GetError().empty()) {
         printf("Error: %s\n", query_result ? query_result->GetError().c_str() : "null result");
         result.SetVectorType(VectorType::CONSTANT_VECTOR);
@@ -84,11 +82,11 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         return;
     }
 
-    // 5. Vector to hold sampled data
+    // Vector to hold sampled data
     std::vector<std::vector<float>> sample_vectors;
     printf("Successfully fetched sample vectors. Processing...\n");
 
-    // 6. Loop over results and extract vectors
+    // Loop over results and extract vectors
     while (auto chunk = query_result->Fetch()) {
         if (!chunk || chunk->size() == 0) {
             break;
@@ -99,7 +97,7 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         auto row_count = chunk->size();
 
         if (logical_type == LogicalTypeId::LIST) {
-            // --- Original LIST handling ---
+            // Original LIST handling
             auto list_data = ListVector::GetData(vector_column);
             auto &child_vector = ListVector::GetEntry(vector_column);
             auto float_data = FlatVector::GetData<float>(child_vector);
@@ -117,7 +115,6 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
             }
 
         } else if (logical_type == LogicalTypeId::ARRAY) {
-            // --- FIX 2: Correct ARRAY handling ---
             auto array_size = ArrayType::GetSize(vector_column.GetType());
             
             // ARRAYs also use ListVector::GetEntry to get the child
@@ -130,7 +127,7 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
             auto float_data = FlatVector::GetData<float>(child_vector);
 
             for (idx_t i = 0; i < row_count; i++) {
-                auto offset = i * array_size; // Calculate offset
+                auto offset = i * array_size;
                 std::vector<float> row_vector;
                 row_vector.reserve(array_size);
                 for (idx_t j = 0; j < array_size; j++) {
@@ -147,12 +144,11 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
 
     printf("Vector sampling complete. Total vectors sampled: %zu\n", sample_vectors.size());
 
-    // --- 7. ADDED: Perform K-Means Clustering ---
+    // Perform K-Means Clustering
     
     // Flatten our vector data for the library
     size_t total_vectors = sample_vectors.size();
     size_t dim = 0;
-    // If sampling returned zero vectors (small tables, low bernoulli sample),
     // fallback to a full-table scan to collect vectors for k-means.
     if (total_vectors == 0) {
         printf("Warning: Sampling returned 0 vectors; performing full-table scan to collect vectors for clustering...\n");
@@ -212,7 +208,7 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
             return;
         }
     }
-    dim = sample_vectors[0].size(); // Get dimensionality (e.g., 128)
+    dim = sample_vectors[0].size();
 
     std::vector<float> flat_data;
     flat_data.reserve(total_vectors * dim);
@@ -222,46 +218,43 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
 
     // Define k-means parameters
     int num_clusters = args.GetValue(3, 0).GetValue<int32_t>();
-    int num_threads = 4;    // Number of threads to use
+    int num_threads = 4;   
 
     printf("Starting k-means clustering with %zu vectors...\n", total_vectors);
     printf("  Clusters: %d, Dimensions: %zu\n", num_clusters, dim);
 
-    // 1. Wrap our flat data in the library's SimpleMatrix class
+    // Wrap our flat data in the library's SimpleMatrix class
     kmeans::SimpleMatrix<float, int> matrix(
-        dim,           // Number of dimensions (e.g., 128)
-        total_vectors, // Number of vectors (e.g., 100642)
-        flat_data.data() // Pointer to the raw float data
+        dim,           
+        total_vectors, 
+        flat_data.data() 
     );
 
-    // 2. Prepare the k-means++ initializer
-    // --- FIX 1: Provide all 3 template args: T, IDX, CLUSTER ---
+    // Prepare the k-means++ initializer
     kmeans::InitializeKmeanspp<float, int, int> initializer;
 
-    // 3. Prepare the Lloyd refinement algorithm
-    // --- FIX 2: Create the RefineLloyd object ---
+    // Prepare the Lloyd refinement algorithm
     kmeans::RefineLloydOptions<float, int> refiner_options;
     refiner_options.max_iterations = 20; // Max 20 iterations
-    kmeans::RefineLloyd<float, int, int> refiner(refiner_options); // <-- Create the refiner
+    kmeans::RefineLloyd<float, int, int> refiner(refiner_options); 
 
-    // 4. Run the k-means computation
+    // Run the k-means computation
     auto result_data = kmeans::compute(
         matrix,
         initializer,
         num_clusters,
-        refiner, // <-- Pass the refiner object, not the options
+        refiner, 
         num_threads
     );
 
     printf("K-means clustering complete.\n");
     printf("  Total Iterations: %d\n", result_data.iterations);
     
-    // 'result_data.centers' is a std::vector<float> containing the centroids
     if (!result_data.centers.empty()) {
         printf("  First centroid's first value: %f\n", result_data.centers[0]);
     }
 
-    // --- PQ TRAINING & CODEBOOK PERSISTENCE ---
+    // PQ TRAINING & CODEBOOK PERSISTENCE
     // Configure PQ parameters
     PQMetadata pq_meta;
     pq_meta.dim = static_cast<int>(dim);
@@ -282,16 +275,14 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         return;
     }
 
-    // --- 8. Next Step: Persist Centroids ---
-    // You would now write 'result_data.centers' to a new table.
+    // Persist Centroids
   
     
-    // We will create a table named 'ivf_centroids_[index_name]'
     auto centroid_table_name = "ivf_centroids_" + index_name;
     
     printf("Persisting %d centroids to table '%s'...\n", num_clusters, centroid_table_name.c_str());
 
-    // 1. Create the table
+    // Create the table
     auto create_table_sql = StringUtil::Format(
         "CREATE OR REPLACE TABLE %s (cluster_id INTEGER, centroid FLOAT[%llu])",
         centroid_table_name, dim
@@ -305,10 +296,9 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         return;
     }
 
-    // 2. Use an Appender for high-speed inserts
-    Appender appender(new_connection, "main", centroid_table_name); // <-- CORRECT
+    // Use an Appender for high-speed inserts
+    Appender appender(new_connection, "main", centroid_table_name);
     
-    // 'result_data.centers' is a flat vector: [c1_f1, c1_f2, ..., c2_f1, c2_f2, ...]
     auto& centers_data = result_data.centers;
 
     for (int c = 0; c < num_clusters; c++) {
@@ -327,8 +317,8 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
 
         // Append the row
         appender.BeginRow();
-        appender.Append(Value::INTEGER(c)); // cluster_id
-        appender.Append(std::move(centroid_array)); // centroid
+        appender.Append(Value::INTEGER(c));
+        appender.Append(std::move(centroid_array));
         appender.EndRow();
     }
     
@@ -384,9 +374,9 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
     
     printf("Successfully loaded %zu centroids back into memory.\n", centroids.size());
 
-    // --- 10. Create and Build Inverted Lists ---
+    // Create and Build Inverted Lists
 
-    // 1. Create the inverted list table
+    // Create the inverted list table
     auto inverted_list_table_name = "ivf_lists_" + index_name;
     printf("Creating inverted list table '%s'...\n", inverted_list_table_name.c_str());
     
@@ -403,13 +393,12 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         return;
     }
 
-    // 2. This map will hold our inverted lists in memory
-    // It maps: cluster_id -> list of vector_ids
+    // This map will hold our inverted lists in memory
     std::map<int, std::vector<int64_t>> inverted_lists;
-    // Map: base table vector id -> PQ code (M bytes)
+    // Map
     std::map<int64_t, std::vector<uint8_t>> pq_codes;
 
-    // 3. Scan the *entire* base table (all 1 million vectors)
+    // Scan the *entire* base table
     printf("Scanning full table '%s' to build inverted lists...\n", table_name.c_str());
     // Force ID to be BIGINT so FlatVector::GetData<int64_t> works correctly
     auto full_scan_query_str = StringUtil::Format("SELECT id::BIGINT, %s FROM %s", column_name, table_name);
@@ -436,7 +425,7 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         
         auto id_data = FlatVector::GetData<int64_t>(id_column);
 
-        // --- Extract vectors (using the same ARRAY logic) ---
+        // Extract vectors (using the same ARRAY logic)
         auto array_size = ArrayType::GetSize(vector_column.GetType());
         auto &child_vector = ListVector::GetEntry(vector_column);
         auto total_child_elements = row_count * array_size;
@@ -446,16 +435,16 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         std::vector<float> current_vector;
         current_vector.reserve(array_size);
 
-        // --- 4. Assign each vector to its nearest centroid and compute PQ codes ---
+        // Assign each vector to its nearest centroid and compute PQ codes
         for (idx_t i = 0; i < row_count; i++) {
-            // 4a. Reconstruct the vector
+            // Reconstruct the vector
             current_vector.clear();
             auto offset = i * array_size;
             for (idx_t j = 0; j < array_size; j++) {
                 current_vector.push_back(float_data[offset + j]);
             }
 
-            // 4b. Find the nearest centroid
+            // Find the nearest centroid
             int best_cluster_id = -1;
             float min_dist = std::numeric_limits<float>::max();
 
@@ -467,19 +456,18 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
                 }
             }
 
-            // 4c. Add this vector's base-table ID to the correct inverted list
+            // Add this vector's base-table ID to the correct inverted list
             auto vec_id = id_data[i];
             inverted_lists[best_cluster_id].push_back(vec_id);
             total_vectors_processed++;
 
-            // 4d. Compute PQ code for this vector using the trained codebooks
-            //     (encode independently per vector so codes are keyed by the base-table id)
+            // Compute PQ code for this vector using the trained codebooks
             std::vector<uint8_t> pq_code;
             pq_code.reserve(pq_codebook.M);
 
             int subdim = pq_codebook.subvector_dim;
             for (int m = 0; m < pq_codebook.M; m++) {
-                const float *cb = pq_codebook.codebooks[m].data(); // Ks * subdim entries
+                const float *cb = pq_codebook.codebooks[m].data();
                 const float *slice = current_vector.data() + m * subdim;
 
                 float best = std::numeric_limits<float>::max();
@@ -501,7 +489,7 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         }
     }
 
-        // --- 5. Persist the inverted lists ---
+        // Persist the inverted lists
         printf("Persisting inverted lists...\n");
         Appender list_appender(new_connection, "main", inverted_list_table_name);
         
@@ -529,7 +517,7 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         list_appender.Close();
         printf("Inverted lists persisted successfully.\n");
 
-    // --- 6. Persist PQ codes (id BIGINT, code UBYTE[]) ---
+    // Persist PQ codes (id BIGINT, code UBYTE[])
     printf("Persisting PQ codes...\n");
     auto pq_codes_table_name = "ivf_pq_codes_" + index_name;
     auto create_pqcodes_sql = StringUtil::Format(
@@ -588,4 +576,4 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
     data[0] = string_t("Index created successfully");
 }
 
-} // namespace duckdb
+}

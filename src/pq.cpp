@@ -6,9 +6,9 @@
 
 using namespace duckdb;
 
-// ---------------------------
+
 // Utility: L2 distance
-// ---------------------------
+
 static float L2Sq(const float *a, const float *b, int dim) {
     float acc = 0.0f;
     for (int i = 0; i < dim; i++) {
@@ -18,9 +18,9 @@ static float L2Sq(const float *a, const float *b, int dim) {
     return acc;
 }
 
-// ---------------------------
+
 // PQ Training (k-means per subspace)
-// ---------------------------
+
 void TrainPQCodebooks(const std::vector<std::vector<float>> &vectors,
                       PQMetadata meta,
                       PQCodebook &out) {
@@ -63,7 +63,7 @@ void TrainPQCodebooks(const std::vector<std::vector<float>> &vectors,
             centroids[k] = subspace_data[k];
         }
 
-        // Lloyd iterations (small number)
+        // Lloyd iterations
         for (int iter = 0; iter < 15; iter++) {
             std::vector<std::vector<float>> new_c(Ks, std::vector<float>(subdim, 0.0f));
             std::vector<int> counts(Ks, 0);
@@ -90,7 +90,7 @@ void TrainPQCodebooks(const std::vector<std::vector<float>> &vectors,
                     for (int d = 0; d < subdim; d++)
                         new_c[k][d] /= counts[k];
                 } else {
-                    // fallback: copy old centroid
+                    // fallback
                     new_c[k] = centroids[k];
                 }
             }
@@ -109,9 +109,9 @@ void TrainPQCodebooks(const std::vector<std::vector<float>> &vectors,
     }
 }
 
-// ---------------------------
+
 // PQ Encoding
-// ---------------------------
+
 void EncodePQCodes(const std::vector<std::vector<float>> &vectors,
                    const PQCodebook &codebook,
                    std::vector<std::vector<uint8_t>> &out) {
@@ -125,7 +125,7 @@ void EncodePQCodes(const std::vector<std::vector<float>> &vectors,
     for (size_t i = 0; i < vectors.size(); i++) {
         const auto &v = vectors[i];
         for (int m = 0; m < M; m++) {
-            const float *cb = codebook.codebooks[m].data(); // Ks*subdim entries
+            const float *cb = codebook.codebooks[m].data(); 
             const float *slice = v.data() + m * subdim;
 
             float best = 1e30f;
@@ -144,9 +144,9 @@ void EncodePQCodes(const std::vector<std::vector<float>> &vectors,
     }
 }
 
-// ---------------------------
+
 // Build Distance LUT
-// ---------------------------
+
 void BuildPQDistanceLUT(const std::vector<float> &query,
                         const PQCodebook &codebook,
                         std::vector<std::vector<float>> &lut) {
@@ -167,9 +167,9 @@ void BuildPQDistanceLUT(const std::vector<float> &query,
     }
 }
 
-// ---------------------------
+
 // PQ Distance
-// ---------------------------
+
 float PQDistance(const std::vector<uint8_t> &pq_code,
                  const std::vector<std::vector<float>> &lut) {
 
@@ -181,9 +181,9 @@ float PQDistance(const std::vector<uint8_t> &pq_code,
     return dist;
 }
 
-// ---------------------------
+
 // Persistence: Codebooks
-// ---------------------------
+
 void PersistPQCodebooks(ClientContext &context,
                         const string &index_name,
                         const PQCodebook &codebook) {
@@ -216,9 +216,9 @@ void PersistPQCodebooks(ClientContext &context,
     }
 }
 
-// ---------------------------
+
 // Persistence: Codes
-// ---------------------------
+
 void PersistPQCodes(ClientContext &context,
                     const string &index_name,
                     const std::vector<std::vector<uint8_t>> &codes) {
@@ -246,9 +246,9 @@ void PersistPQCodes(ClientContext &context,
     }
 }
 
-// ---------------------------
+
 // Load Codebooks
-// ---------------------------
+
 void LoadPQCodebooks(ClientContext &context,
                      const string &index_name,
                      PQCodebook &codebook) {
@@ -266,12 +266,12 @@ void LoadPQCodebooks(ClientContext &context,
     int Ks = 0;
     int subdim = 0;
 
-    // First pass: infer M, Ks, subdim
+    // First pass - infer M, Ks, subdim
     for (auto &row : *res) {
         int m = row.GetValue<int>(0);
         int k = row.GetValue<int>(1);
 
-        // values is a FLOAT[] LIST; extract children
+        // values is a FLOAT[] LIST
         Value list_val = row.GetValue<Value>(2);
         auto &children = ListValue::GetChildren(list_val);
 
@@ -291,7 +291,7 @@ void LoadPQCodebooks(ClientContext &context,
     codebook.subvector_dim = subdim;
     codebook.codebooks.resize(M, std::vector<float>(Ks * subdim));
 
-    // Second pass: fill data
+    // Second pass - fill data
     for (auto &row : *res) {
         int m = row.GetValue<int>(0);
         int k = row.GetValue<int>(1);

@@ -4,20 +4,20 @@ import numpy as np
 import pandas as pd
 import os
 
-# ============================================================
+
 # CONFIG
-# ============================================================
+
 DB = "sift_data.db"
 EXT = "build/release/extension/ivf/ivf.duckdb_extension"
 
-BASE_TABLE = "sift_base"      # table with vectors
-VEC_COL    = "vec"            # vector column
+BASE_TABLE = "sift_base"      
+VEC_COL    = "vec"            
 ID_COL     = "id"
 
 # Cluster sizes to sweep
 CLUSTER_SWEEP = [1024, 2048, 4096]
 
-# nprobe to use for main evaluation (you can still sweep inside if needed)
+# nprobe to use for main evaluation
 DEFAULT_NPROBE = 64
 
 # Number of random query vectors to evaluate for recall
@@ -25,7 +25,7 @@ NUM_QUERY_VECS = 100
 
 NPROBE_SWEEP = [32, 64, 128, 256]
 
-# Hybrid filter clauses to test (assumes your ann_search can see these columns)
+# Hybrid filter clauses to test
 FILTER_CLAUSES = {
     "no_filter": "",
     "region_US": "region = 'US'",
@@ -35,9 +35,9 @@ FILTER_CLAUSES = {
 }
 
 
-# ============================================================
+
 # HELPERS
-# ============================================================
+
 
 def connect_and_load():
     con = duckdb.connect(DB, config={'allow_unsigned_extensions': 'true'})
@@ -69,7 +69,7 @@ def build_index(con, index_name, num_clusters, use_pq=True):
     before_size = os.path.getsize(DB)
 
     if use_pq:
-        # IVFPQ (compressed)
+        # IVFPQ 
         con.execute(f"""
             SELECT create_ivf_index(
                 '{index_name}',
@@ -79,9 +79,8 @@ def build_index(con, index_name, num_clusters, use_pq=True):
             )
         """)
     else:
-        # Plain IVFFlat version (no PQ)
+        # Plain IVFFlat version 
         # If your function needs an explicit flag, change this to:
-        # SELECT create_ivf_index('{index_name}', '{BASE_TABLE}', '{VEC_COL}', {num_clusters}, FALSE)
         con.execute(f"""
             SELECT create_ivf_index(
                 '{index_name}',
@@ -214,7 +213,7 @@ def eval_filter_selectivity(con, index_name, query_vec, k, nprobe):
     print(f"\n=== Hybrid Filter Selectivity (index={index_name}) ===")
     rows = []
 
-    # No filter baseline (pure ANN)
+    # No filter baseline
     t0 = time.time()
     base_ids = ann_search_topk(con, index_name, query_vec, k, nprobe, where_clause="")
     base_time = time.time() - t0
@@ -261,11 +260,11 @@ def memory_profile(con, index_name):
     """
     print(f"\n=== Memory Profile for index '{index_name}' ===")
 
-    # 1. List all tables
+    # List all tables
     tables = con.execute("SHOW TABLES").fetchall()
     table_names = [t[0] for t in tables]
 
-    # 2. Filter tables belonging to this index
+    # Filter tables belonging to this index
     related = [t for t in table_names if index_name in t]
 
     if not related:
@@ -274,7 +273,7 @@ def memory_profile(con, index_name):
 
     rows = []
 
-    # 3. Run storage_info for each matching table
+    # Run storage_info for each matching table
     for tbl in related:
         try:
             df = con.execute(f"PRAGMA storage_info('{tbl}')").df()
@@ -311,9 +310,9 @@ def memory_profile(con, index_name):
     return mem_df
 
 
-# ============================================================
+
 # MAIN
-# ============================================================
+
 
 def main():
     con = connect_and_load()
@@ -321,19 +320,16 @@ def main():
 
     # Sample queries for recall evaluation
     queries = sample_queries(con, NUM_QUERY_VECS)
-    # queries = [row[0] for row in con.execute("SELECT vec FROM sift_query").fetchall()]
 
     all_results = []
-#    mem_results = []
 
-    # For filter selectivity, just use the first query vector
     filter_query = queries[0] if queries else None
 
     for num_clusters in CLUSTER_SWEEP:
 
-        # ---------------------------
-        # 2) IVFPQ (with PQ)
-        # ---------------------------
+        
+        # IVFPQ
+        
         pq_index = f"ivfpq_{num_clusters}"
 
         if index_exists(con, pq_index):
@@ -342,7 +338,6 @@ def main():
             pq_mem_mb = 0.0
         else:
             pq_build_time, pq_mem_mb = build_index(con, pq_index, num_clusters, use_pq=True)
-        # pq_build_time, pq_mem_mb = build_index(con, pq_index, num_clusters, use_pq=True)
         for nprobe_cap in NPROBE_SWEEP:
             for k_val in [1, 10, 100]:
                 res_pq = eval_recall_latency(
@@ -359,26 +354,18 @@ def main():
                 res_pq["file_mb"] = pq_mem_mb
                 all_results.append(res_pq)
 
-#        mem_pq = memory_profile(con, pq_index)
-#        mem_pq["num_clusters"] = num_clusters
-#        mem_pq["index_type"] = "IVFPQ"
-#        mem_results.append(mem_pq)
-
         if filter_query is not None:
             df_filters_pq = eval_filter_selectivity(con, pq_index, filter_query, k=10, nprobe=DEFAULT_NPROBE)
             print("\nFilter selectivity (IVFPQ) summary:")
             print(df_filters_pq)
 
-    # --------------------------------------------------------
+    
     # Final summary tables
-    # --------------------------------------------------------
+    
     results_df = pd.DataFrame(all_results)
     print("\n==================== OVERALL ANN RESULTS ====================")
     print(results_df)
 
-#    mem_df = pd.concat(mem_results, ignore_index=True) if mem_results else pd.DataFrame()
-#    print("\n==================== MEMORY PROFILE SUMMARY ====================")
-#    print(mem_df)
 
     import matplotlib.pyplot as plt
 
@@ -409,9 +396,8 @@ def main():
 
     print("Saved plots: recall_k1.png, recall_k10.png, recall_k100.png, latency_k10.png")
 
-    # Optionally: save to CSV for plotting
+    # save to CSV for plotting
     results_df.to_csv("ivf_eval_results.csv", index=False)
-#    mem_df.to_csv("ivf_memory_profile.csv", index=False)
     print("\nSaved ivf_eval_results.csv and ivf_memory_profile.csv.")
 
 

@@ -26,13 +26,12 @@ static void LoadInternal(DatabaseInstance &db) {
     // Create a connection for registration
     Connection con(db);
     
-    // --- FIX: Start a Transaction ---
     // Accessing the catalog requires an active transaction context.
     con.BeginTransaction();
     
     auto &context = *con.context;
 
-    // --- 1. Register CREATE_IVF_INDEX (Scalar Function) ---
+    // Register CREATE_IVF_INDEX
     ScalarFunction create_ivf_index_func("create_ivf_index", 
         {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER},
         LogicalType::VARCHAR, 
@@ -44,9 +43,8 @@ static void LoadInternal(DatabaseInstance &db) {
     catalog.CreateFunction(context, scalar_info);
 
 
-    // --- 2. Register ANN_SEARCH (Table Function) ---
+    // Register ANN_SEARCH
     // Use a variable-length list for the query vector so different dimensionalities
-    // are accepted (avoids hard-coded FLOAT[128] signature mismatches).
     TableFunction ann_search_func("ann_search", 
         {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::FLOAT), LogicalType::INTEGER, LogicalType::INTEGER}, 
         ComputeIVFSearch, 
@@ -65,19 +63,18 @@ static void LoadInternal(DatabaseInstance &db) {
     catalog.CreateFunction(context, table_func_info);
 
 
-    // --- 3. Register Optimizer ---
+    // Register Optimizer
     OptimizerExtension ivf_optimizer;
     ivf_optimizer.optimize_function = IVFIndexOptimizer::Optimize;
     
     db.config.optimizer_extensions.push_back(ivf_optimizer);
     
-    // --- FIX: Commit the Transaction ---
     con.Commit();
     
     printf("IVF Extension loaded (v1.4 compliant).\n");
 }
 
-// --- C++ Class Implementation ---
+
 void IvfExtension::Load(ExtensionLoader &loader) {
     LoadInternal(loader.GetDatabaseInstance());
 }
@@ -94,9 +91,9 @@ std::string IvfExtension::Version() const {
 #endif
 }
 
-} // namespace duckdb
+} 
 
-// --- C Entry Point ---
+
 extern "C" {
 
 DUCKDB_EXTENSION_API void ivf_duckdb_cpp_init(duckdb::ExtensionLoader &loader) {

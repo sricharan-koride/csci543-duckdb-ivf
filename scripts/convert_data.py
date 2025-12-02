@@ -16,11 +16,9 @@ def read_fvecs(filename):
         data = np.fromfile(f, dtype=dt)
         
     # The 'vec' field of the structured array is our 2D array of vectors
-    # This will have the correct shape, e.g., (1000000, 128)
     vectors = data['vec']
     return vectors
 
-# --- Main conversion logic ---
 # Get the script's directory to build relative paths
 SCRIPT_DIR = os.path.dirname(__file__)
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
@@ -45,7 +43,7 @@ else:
     # We need an 'id' column and a 'vec' column
     df = pd.DataFrame({
         'id': np.arange(vectors.shape[0]),
-        'vec': list(vectors)  # Store vectors as a list of 1D numpy arrays
+        'vec': list(vectors)  
     })
     
     print(f"Saving to '{PARQUET_FILE}'...")

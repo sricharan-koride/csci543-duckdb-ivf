@@ -1,5 +1,5 @@
 #include "ivf_optimizer.hpp"
-#include "ivf_search.hpp" // <-- CRITICAL: Need this to access IVFSearchFunctionData
+#include "ivf_search.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
@@ -12,7 +12,7 @@
 
 namespace duckdb {
 
-// Helper to extract IDs from an OR tree (id=1 OR id=2 OR ...)
+// Helper to extract IDs from an OR tree
 bool ExtractIDs(Expression &expr, vector<Value> &ids) {
     if (expr.type == ExpressionType::CONJUNCTION_OR) {
         auto &conj = expr.Cast<BoundConjunctionExpression>();
@@ -60,7 +60,6 @@ bool ExtractIDs(Expression &expr, vector<Value> &ids) {
 
 // Try to serialize a simple predicate into a SQL WHERE fragment.
 // Supports =, IN, <, <=, >, >= and AND conjunctions where the left side is a column ref
-// and the right side(s) are constants. Returns true on success and writes clause to out.
 bool SerializePredicate(Expression &expr, string &out) {
     if (expr.type == ExpressionType::CONJUNCTION_AND) {
         auto &conj = expr.Cast<BoundConjunctionExpression>();
@@ -109,7 +108,7 @@ bool SerializePredicate(Expression &expr, string &out) {
         return true;
     }
 
-    // IN operator (BoundOperatorExpression)
+    // IN operator
     if (expr.type == ExpressionType::COMPARE_IN) {
         auto &op = expr.Cast<BoundOperatorExpression>();
         Expression* left = op.children[0].get();
@@ -155,12 +154,11 @@ void IVFIndexOptimizer::Optimize(OptimizerExtensionInput &input, unique_ptr<Logi
         vector<Value> allowed_ids;
         if (ExtractIDs(*expr, allowed_ids)) {
             
-            printf("🚀 IVF OPTIMIZER: Pushdown detected! Moving %zu IDs into ann_search.\n", allowed_ids.size());
+            printf("IVF OPTIMIZER: Pushdown detected! Moving %zu IDs into ann_search.\n", allowed_ids.size());
             
-            // 1. Update named_parameters (For consistency/Explain)
+            // Update named_parameters
             table_function.named_parameters["allowed_ids"] = Value::LIST(LogicalType::BIGINT, allowed_ids);
             
-            // 2. CRITICAL FIX: Update the Bind Data directly!
             // Since Bind has already run, we must update the struct that Init will read.
             if (table_function.bind_data) {
                 auto &bind_data = table_function.bind_data->Cast<IVFSearchFunctionData>();
@@ -182,7 +180,7 @@ void IVFIndexOptimizer::Optimize(OptimizerExtensionInput &input, unique_ptr<Logi
         // Try to serialize predicate for simple pushdown (equality/IN/range on a column)
         string where_clause;
         if (SerializePredicate(*expr, where_clause)) {
-            printf("🚀 IVF OPTIMIZER: Predicate pushdown detected! Clause: %s\n", where_clause.c_str());
+            printf("IVF OPTIMIZER: Predicate pushdown detected! Clause: %s\n", where_clause.c_str());
             table_function.named_parameters["where_clause"] = Value(where_clause);
             if (table_function.bind_data) {
                 auto &bind_data = table_function.bind_data->Cast<IVFSearchFunctionData>();
@@ -200,4 +198,4 @@ void IVFIndexOptimizer::Optimize(OptimizerExtensionInput &input, unique_ptr<Logi
     }
 }
 
-} // namespace duckdb
+}

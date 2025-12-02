@@ -8,11 +8,11 @@ def read_fvecs(path):
     data = np.fromfile(path, dtype='int32')
     dim = data[0]
     assert dim == 128, f"Expected 128D, got {dim}"
-    data = data.reshape(-1, dim + 1)  # (N, 129: 1 dim + 128 floats)
-    return data[:, 1:].view('float32')  # drop the first int dimension
+    data = data.reshape(-1, dim + 1)  
+    return data[:, 1:].view('float32')  
 
 
-queries = read_fvecs("data/sift/sift_query.fvecs")   # → numpy array shape (10000,128)
+queries = read_fvecs("data/sift/sift_query.fvecs")   
 print("Loaded:", queries.shape)
 
 import pandas as pd

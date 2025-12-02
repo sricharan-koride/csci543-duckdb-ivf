@@ -6,16 +6,16 @@ using std::string;
 using namespace duckdb;
 
 struct PQCodebook {
-    int M;            // num subspaces
-    int Ks;           // centroids per subspace (e.g., 256)
+    int M;            
+    int Ks;           
     int subvector_dim;
-    std::vector<std::vector<float>> codebooks; // flattened: M codebooks each of size Ks*subvector_dim
+    std::vector<std::vector<float>> codebooks; 
 };
 
 struct PQMetadata {
-    int dim;          // vector dimension (128)
-    int M;            // num subspaces
-    int Ks;           // K for codebooks
+    int dim;          
+    int M;            
+    int Ks;           
 };
 
 void TrainPQCodebooks(const std::vector<std::vector<float>> &vectors, PQMetadata meta, PQCodebook &out);
