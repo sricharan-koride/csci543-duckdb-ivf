@@ -10,7 +10,7 @@
 
 namespace kmeans {
 
-// --- MOVED INTERNAL NAMESPACE TO THE TOP ---
+// MOVED INTERNAL NAMESPACE TO THE TOP
 namespace internal {
 
 inline std::mt19937& get_PRNG() {
@@ -89,8 +89,7 @@ void update_min_dist(const SimpleMatrix<T, IDX>& data, const T* centers, CLUSTER
     }
 }
 
-} // namespace internal
-// --- END OF INTERNAL NAMESPACE ---
+}
 
 
 template<typename T, typename IDX, typename CLUSTER>
@@ -186,7 +185,6 @@ struct RefineLloyd {
     }
 };
 
-// --- FIX 2: Added explicit C++11 return type ---
 template<typename T, typename IDX, typename CLUSTER, class INIT, class REFINE>
 typename REFINE::Results compute(const SimpleMatrix<T, IDX>& data, const INIT& init, CLUSTER ncenters, const REFINE& refine, int nthreads) {
     std::vector<T> centers(data.nrow * ncenters);
@@ -195,6 +193,6 @@ typename REFINE::Results compute(const SimpleMatrix<T, IDX>& data, const INIT& i
     return refine.run(data, ncenters, centers.data());
 }
 
-} // namespace kmeans
+}
 
 #endif

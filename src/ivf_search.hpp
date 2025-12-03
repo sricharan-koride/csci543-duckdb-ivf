@@ -2,30 +2,39 @@
 
 #include "duckdb.hpp"
 #include <vector>
-#include <unordered_set> // <-- Added
+#include <unordered_set> 
 
 namespace duckdb {
 
-// --- Updated: Function Data now holds the filter ---
 struct IVFSearchFunctionData : public TableFunctionData {
     string index_name;
     int32_t k;
     int32_t nprobe;
     std::vector<float> query_vector;
     
-    // Filter Data (Parsed during Bind)
+    // Filter Data 
     bool has_filter = false;
     std::unordered_set<int64_t> allowed_ids;
+    // Free-form WHERE clause pushed from optimizer 
+    bool has_where = false;
+    string where_clause;
+    // Base table name 
+    string base_table;
 };
 
-// --- State object ---
+
 struct IVFSearchGlobalState : public GlobalTableFunctionState {
     // Index Data
     std::vector<std::vector<float>> centroids;
     
-    // Filter Data (Copied from FunctionData)
+    // Filter Data
     bool has_filter = false; 
     std::unordered_set<int64_t> allowed_ids;
+    // Where-clause pushed from optimizer
+    bool has_where = false;
+    string where_clause;
+    // Base table name to scan for candidates
+    string base_table;
 
     // Results
     struct SearchResult {
@@ -44,4 +53,4 @@ unique_ptr<GlobalTableFunctionState> InitIVFSearch(ClientContext &context, Table
 
 void ComputeIVFSearch(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
-} // namespace duckdb
+}
