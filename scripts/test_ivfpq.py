@@ -319,7 +319,8 @@ def main():
     check_base_schema(con)
 
     # Sample queries for recall evaluation
-    queries = sample_queries(con, NUM_QUERY_VECS)
+    #queries = sample_queries(con, NUM_QUERY_VECS)
+    queries = [row[0] for row in con.execute("SELECT vec FROM sift_query LIMIT 1000").fetchall()]
 
     all_results = []
 
