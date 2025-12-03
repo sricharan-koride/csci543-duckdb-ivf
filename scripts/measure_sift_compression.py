@@ -44,7 +44,7 @@ def main():
         
         # The Ratio
         ratio = raw_size_bytes / pq_size_bytes
-        print(f"\n✅ Compression Ratio: {ratio:.1f}x")
+        print(f"\n Compression Ratio: {ratio:.1f}x")
         
     except Exception as e:
         print(f"Error: Could not find PQ table '{pq_table}'. Did you build the index?")
