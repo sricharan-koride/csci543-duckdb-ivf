@@ -33,7 +33,7 @@ static void LoadInternal(DatabaseInstance &db) {
 
     // Register CREATE_IVF_INDEX
     ScalarFunction create_ivf_index_func("create_ivf_index", 
-        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER},
+        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::VARCHAR},
         LogicalType::VARCHAR, 
         CreateIVFIndex
     );

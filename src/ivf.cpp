@@ -8,6 +8,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/connection.hpp"
 #include "pq.hpp"
+#include "metric.hpp"
 #include <cstdint>
 
 // ADD THESE HEADERS FOR K-MEANS 
@@ -28,15 +29,7 @@ namespace {
 
 // Helper function to compute L2 (Euclidean) distance
 // We use squared distance to avoid the expensive sqrt()
-float L2SquaredDistance(const std::vector<float>& a, const std::vector<float>& b) {
-    float sum = 0;
-    size_t dim = a.size();
-    for (size_t i = 0; i < dim; i++) {
-        float diff = a[i] - b[i];
-        sum += diff * diff;
-    }
-    return sum;
-}
+
 
 // Pointer-based helper for PQ encoding
 float L2SquaredDistancePtr(const float *a, const float *b, size_t dim) {
@@ -55,10 +48,13 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
     auto index_name = args.GetValue(0, 0).ToString();
     auto table_name = args.GetValue(1, 0).ToString();
     auto column_name = args.GetValue(2, 0).ToString();
+    auto metric_str = args.GetValue(4, 0).ToString();
+    auto metric_type = GetMetricType(metric_str);
     printf("CreateIVFIndex called:\n");
     printf("  Index Name: %s\n", index_name.c_str());
     printf("  Table Name: %s\n", table_name.c_str()); 
     printf("  Column Name: %s\n", column_name.c_str());
+    printf("  Metric: %s\n", metric_str.c_str());
 
     // Create a new, independent connection
     auto &db = state.GetContext().db;
@@ -209,6 +205,13 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
         }
     }
     dim = sample_vectors[0].size();
+
+    if (metric_type == DistanceMetric::COSINE_SIM) {
+        printf("Metric is COSINE_SIM. Normalizing sample vectors...\n");
+        for (auto &vec : sample_vectors) {
+            NormalizeVector(vec);
+        }
+    }
 
     std::vector<float> flat_data;
     flat_data.reserve(total_vectors * dim);
@@ -444,6 +447,10 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
                 current_vector.push_back(float_data[offset + j]);
             }
 
+            if (metric_type == DistanceMetric::COSINE_SIM) {
+                NormalizeVector(current_vector);
+            }
+
             // Find the nearest centroid
             int best_cluster_id = -1;
             float min_dist = std::numeric_limits<float>::max();
@@ -559,16 +566,16 @@ void CreateIVFIndex(DataChunk &args, ExpressionState &state, Vector &result) {
 
     // Persist index metadata for ann_search to discover the base table
     auto create_meta_sql = StringUtil::Format(
-        "CREATE TABLE IF NOT EXISTS ivf_index_metadata (index_name VARCHAR, table_name VARCHAR, column_name VARCHAR)"
+        "CREATE TABLE IF NOT EXISTS ivf_index_metadata (index_name VARCHAR, table_name VARCHAR, column_name VARCHAR, metric VARCHAR)"
     );
     context.Query(create_meta_sql, false);
     auto insert_meta_sql = StringUtil::Format(
-        "INSERT INTO ivf_index_metadata VALUES ('%s', '%s', '%s')",
-        index_name.c_str(), table_name.c_str(), column_name.c_str()
+        "INSERT INTO ivf_index_metadata VALUES ('%s', '%s', '%s', '%s')",
+        index_name.c_str(), table_name.c_str(), column_name.c_str(), metric_str.c_str()
     );
     context.Query(insert_meta_sql, false);
 
-    printf("Finished scanning. Total vectors processed: %ld\n", total_vectors_processed);
+    printf("Finished scanning. Total vectors processed: %lld\n", total_vectors_processed);
 
     // Return a success message
     result.SetVectorType(VectorType::CONSTANT_VECTOR);

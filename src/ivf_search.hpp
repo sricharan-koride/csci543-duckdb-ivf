@@ -4,6 +4,8 @@
 #include <vector>
 #include <unordered_set> 
 
+#include "metric.hpp"
+
 namespace duckdb {
 
 struct IVFSearchFunctionData : public TableFunctionData {
@@ -35,6 +37,8 @@ struct IVFSearchGlobalState : public GlobalTableFunctionState {
     string where_clause;
     // Base table name to scan for candidates
     string base_table;
+    DistanceMetric metric = DistanceMetric::L2;
+    std::vector<float> query_vector;
 
     // Results
     struct SearchResult {

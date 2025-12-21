@@ -14,18 +14,6 @@
 namespace duckdb {
 
 // L2 Distance
-static float L2SquaredDistance(const std::vector<float>& a, const std::vector<float>& b) {
-    float sum = 0;
-    size_t dim = a.size();
-    // Safety check
-    if (b.size() != dim) return std::numeric_limits<float>::infinity();
-    
-    for (size_t i = 0; i < dim; i++) {
-        float diff = a[i] - b[i];
-        sum += diff * diff;
-    }
-    return sum;
-}
 
 unique_ptr<FunctionData> BindIVFSearch(ClientContext &context, TableFunctionBindInput &input,
                                        vector<LogicalType> &return_types, vector<string> &names) {
@@ -129,21 +117,31 @@ unique_ptr<GlobalTableFunctionState> InitIVFSearch(ClientContext &context, Table
         printf("Error loading index: %s\n", e.what());
     }
 
-    // Load base table name from metadata table if present
+    // Load base table name and metric from metadata table
     try {
-        auto meta_q = StringUtil::Format("SELECT table_name FROM ivf_index_metadata WHERE index_name = '%s' LIMIT 1", bind_data.index_name.c_str());
+        auto meta_q = StringUtil::Format("SELECT table_name, metric FROM ivf_index_metadata WHERE index_name = '%s' LIMIT 1", bind_data.index_name.c_str());
         auto meta_res = new_context.Query(meta_q, false);
         if (meta_res && meta_res->GetError().empty()) {
             while (auto chunk = meta_res->Fetch()) {
                 if (!chunk || chunk->size() == 0) break;
-                auto &col = chunk->data[0];
-                auto row_count = chunk->size();
-                // Read first row's string
-                auto str_data = FlatVector::GetData<string_t>(col);
-                if (row_count > 0) {
+                
+                // Table Name (col 0)
+                auto &col0 = chunk->data[0];
+                auto str_data = FlatVector::GetData<string_t>(col0);
+                if (chunk->size() > 0) {
                     state->base_table = str_data[0].GetString();
-                    break;
                 }
+
+                // Metric (col 1) -- Only present if table schema updated
+                if (chunk->ColumnCount() > 1) {
+                    auto &col1 = chunk->data[1];
+                    auto metric_data = FlatVector::GetData<string_t>(col1);
+                    state->metric = GetMetricType(metric_data[0].GetString());
+                } else {
+                    // Fallback to L2 if not present
+                    state->metric = DistanceMetric::L2;
+                }
+                break;
             }
         }
     } catch (...) {
